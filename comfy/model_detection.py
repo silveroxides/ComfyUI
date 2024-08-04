@@ -115,6 +115,36 @@ def detect_unet_config(state_dict, key_prefix):
         unet_config["n_layers"] = double_layers + single_layers
         return unet_config
 
+    if '{}mlp_t5.0.weight'.format(key_prefix) in state_dict_keys: #Hunyuan DiT
+        unet_config = {}
+        unet_config["image_model"] = "hydit"
+        unet_config["depth"] = count_blocks(state_dict_keys, '{}blocks.'.format(key_prefix) + '{}.')
+        unet_config["hidden_size"] = state_dict['{}x_embedder.proj.weight'.format(key_prefix)].shape[0]
+        if unet_config["hidden_size"] == 1408 and unet_config["depth"] == 40: #DiT-g/2
+            unet_config["mlp_ratio"] = 4.3637
+        if state_dict['{}extra_embedder.0.weight'.format(key_prefix)].shape[1] == 3968:
+            unet_config["size_cond"] = True
+            unet_config["use_style_cond"] = True
+            unet_config["image_model"] = "hydit1"
+        return unet_config
+
+    if '{}double_blocks.0.img_attn.norm.key_norm.scale'.format(key_prefix) in state_dict_keys: #Flux
+        dit_config = {}
+        dit_config["image_model"] = "flux"
+        dit_config["in_channels"] = 64
+        dit_config["vec_in_dim"] = 768
+        dit_config["context_in_dim"] = 4096
+        dit_config["hidden_size"] = 3072
+        dit_config["mlp_ratio"] = 4.0
+        dit_config["num_heads"] = 24
+        dit_config["depth"] = 19
+        dit_config["depth_single_blocks"] = 38
+        dit_config["axes_dim"] = [16, 56, 56]
+        dit_config["theta"] = 10000
+        dit_config["qkv_bias"] = True
+        dit_config["guidance_embed"] = "{}guidance_in.in_layer.weight".format(key_prefix) in state_dict_keys
+        return dit_config
+
     if '{}input_blocks.0.0.weight'.format(key_prefix) not in state_dict_keys:
         return None
 
