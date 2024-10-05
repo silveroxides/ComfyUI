@@ -399,6 +399,8 @@ class CLIPType(Enum):
     STABLE_AUDIO = 4
     HUNYUAN_DIT = 5
     FLUX = 6
+    CUSTOMFLUX = 7
+    CUSTOMFLUXG = 8
 
 def load_clip(ckpt_paths, embedding_directory=None, clip_type=CLIPType.STABLE_DIFFUSION, model_options={}):
     clip_data = []
@@ -496,12 +498,31 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
 
             clip_target.clip = comfy.text_encoders.flux.flux_clip(dtype_t5=dtype_t5)
             clip_target.tokenizer = comfy.text_encoders.flux.FluxTokenizer
+        elif clip_type == CLIPType.CUSTOMFLUX:
+            weight_name = "encoder.block.23.layer.1.DenseReluDense.wi_1.weight"
+            weight = clip_data[0].get(weight_name, clip_data[1].get(weight_name, None))
+            dtype_t5 = None
+            if weight is not None:
+                dtype_t5 = weight.dtype
+
+            clip_target.clip = comfy.text_encoders.flux.flux_clipcustom(dtype_t5=dtype_t5)
+            clip_target.tokenizer = comfy.text_encoders.flux.FluxTokenizer
         else:
             clip_target.clip = sdxl_clip.SDXLClipModel
             clip_target.tokenizer = sdxl_clip.SDXLTokenizer
     elif len(clip_data) == 3:
-        clip_target.clip = comfy.text_encoders.sd3_clip.SD3ClipModel
-        clip_target.tokenizer = comfy.text_encoders.sd3_clip.SD3Tokenizer
+        if clip_type == CLIPType.CUSTOMFLUXG:
+            weight_name = "encoder.block.23.layer.1.DenseReluDense.wi_1.weight"
+            weight = clip_data[0].get(weight_name, clip_data[1].get(weight_name, None))
+            dtype_t5 = None
+            if weight is not None:
+                dtype_t5 = weight.dtype
+
+            clip_target.clip = comfy.text_encoders.flux.flux_clipcustomg(dtype_t5=dtype_t5)
+            clip_target.tokenizer = comfy.text_encoders.flux.FluxTokenizerG
+        else:
+            clip_target.clip = comfy.text_encoders.sd3_clip.SD3ClipModel
+            clip_target.tokenizer = comfy.text_encoders.sd3_clip.SD3Tokenizer
 
     parameters = 0
     tokenizer_data = {}

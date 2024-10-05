@@ -657,6 +657,10 @@ class Flux(supported_models_base.BASE):
         dtype_t5 = None
         if t5_key in state_dict:
             dtype_t5 = state_dict[t5_key].dtype
+            if "{}clip_l.transformer.text_model.final_layer_norm.weight".format(pref) in state_dict and "{}clip_g.transformer.text_model.final_layer_norm.weight".format(pref) in state_dict:
+                clip_l = True
+                clip_g = True
+                return supported_models_base.ClipTarget(comfy.text_encoders.flux.FluxTokenizerG, comfy.text_encoders.flux.flux_clipcustomg(dtype_t5=dtype_t5))
         return supported_models_base.ClipTarget(comfy.text_encoders.flux.FluxTokenizer, comfy.text_encoders.flux.flux_clip(dtype_t5=dtype_t5))
 
 class FluxSchnell(Flux):

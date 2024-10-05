@@ -4,23 +4,6 @@ import comfy.model_management
 import nodes
 import torch
 
-class TripleCLIPLoader:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {"required": { "clip_name1": (folder_paths.get_filename_list("clip"), ), "clip_name2": (folder_paths.get_filename_list("clip"), ), "clip_name3": (folder_paths.get_filename_list("clip"), )
-                             }}
-    RETURN_TYPES = ("CLIP",)
-    FUNCTION = "load_clip"
-
-    CATEGORY = "advanced/loaders"
-
-    def load_clip(self, clip_name1, clip_name2, clip_name3):
-        clip_path1 = folder_paths.get_full_path_or_raise("clip", clip_name1)
-        clip_path2 = folder_paths.get_full_path_or_raise("clip", clip_name2)
-        clip_path3 = folder_paths.get_full_path_or_raise("clip", clip_name3)
-        clip = comfy.sd.load_clip(ckpt_paths=[clip_path1, clip_path2, clip_path3], embedding_directory=folder_paths.get_folder_paths("embeddings"))
-        return (clip,)
-
 class EmptySD3LatentImage:
     def __init__(self):
         self.device = comfy.model_management.intermediate_device()
@@ -96,7 +79,6 @@ class ControlNetApplySD3(nodes.ControlNetApplyAdvanced):
     DEPRECATED = True
 
 NODE_CLASS_MAPPINGS = {
-    "TripleCLIPLoader": TripleCLIPLoader,
     "EmptySD3LatentImage": EmptySD3LatentImage,
     "CLIPTextEncodeSD3": CLIPTextEncodeSD3,
     "ControlNetApplySD3": ControlNetApplySD3,

@@ -909,7 +909,7 @@ class DualCLIPLoader:
     def INPUT_TYPES(s):
         return {"required": { "clip_name1": (folder_paths.get_filename_list("clip"), ),
                               "clip_name2": (folder_paths.get_filename_list("clip"), ),
-                              "type": (["sdxl", "sd3", "flux"], ),
+                              "type": (["sdxl", "sd3", "flux", "customflux"], ),
                              }}
     RETURN_TYPES = ("CLIP",)
     FUNCTION = "load_clip"
@@ -925,8 +925,35 @@ class DualCLIPLoader:
             clip_type = comfy.sd.CLIPType.SD3
         elif type == "flux":
             clip_type = comfy.sd.CLIPType.FLUX
+        elif type == "customflux":
+            clip_type = comfy.sd.CLIPType.CUSTOMFLUX
 
         clip = comfy.sd.load_clip(ckpt_paths=[clip_path1, clip_path2], embedding_directory=folder_paths.get_folder_paths("embeddings"), clip_type=clip_type)
+        return (clip,)
+
+class TripleCLIPLoader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "clip_name1": (folder_paths.get_filename_list("clip"), ), 
+                              "clip_name2": (folder_paths.get_filename_list("clip"), ), 
+                              "clip_name3": (folder_paths.get_filename_list("clip"), ),
+                              "type": (["sd3", "flux"], ),
+                             }}
+    RETURN_TYPES = ("CLIP",)
+    FUNCTION = "load_clip"
+
+    CATEGORY = "advanced/loaders"
+
+    def load_clip(self, clip_name1, clip_name2, clip_name3, type):
+        clip_path1 = folder_paths.get_full_path_or_raise("clip", clip_name1)
+        clip_path2 = folder_paths.get_full_path_or_raise("clip", clip_name2)
+        clip_path3 = folder_paths.get_full_path_or_raise("clip", clip_name3)
+        if type == "sd3":
+            clip_type = comfy.sd.CLIPType.SD3
+        elif type == "flux":
+            clip_type = comfy.sd.CLIPType.CUSTOMFLUXG
+            
+        clip = comfy.sd.load_clip(ckpt_paths=[clip_path1, clip_path2, clip_path3], embedding_directory=folder_paths.get_folder_paths("embeddings"), clip_type=clip_type)
         return (clip,)
 
 class CLIPVisionLoader:
@@ -1867,6 +1894,7 @@ NODE_CLASS_MAPPINGS = {
     "CLIPLoader": CLIPLoader,
     "UNETLoader": UNETLoader,
     "DualCLIPLoader": DualCLIPLoader,
+    "TripleCLIPLoader": TripleCLIPLoader,
     "CLIPVisionEncode": CLIPVisionEncode,
     "StyleModelApply": StyleModelApply,
     "unCLIPConditioning": unCLIPConditioning,
