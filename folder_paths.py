@@ -5,6 +5,7 @@ import re
 import time
 import mimetypes
 import logging
+import locale
 from typing import Literal
 from collections.abc import Collection
 
@@ -394,16 +395,29 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
 
         return input_str
 
-    if "%" in filename_prefix:
-        filename_prefix = compute_vars(filename_prefix, image_width, image_height)
+    filename_prefix = compute_vars(filename_prefix, image_width, image_height)
 
     subfolder = os.path.dirname(os.path.normpath(filename_prefix))
     filename = os.path.basename(os.path.normpath(filename_prefix))
 
+    if not subfolder:
+        try:
+            locale.setlocale(locale.LC_TIME, '')
+            default_date_format = locale.nl_langinfo(locale.D_FMT).replace("%y", "%Y")
+            if os.name == 'nt':
+                default_date_format = default_date_format.replace("/", "-").replace("\\", "-").replace(":","-")
+            subfolder = time.strftime(default_date_format)
+
+
+        except (locale.Error, AttributeError):
+            subfolder = time.strftime("%Y-%m-%d")
+            if os.name == 'nt':
+                subfolder = subfolder.replace("/", "-").replace("\\", "-").replace(":","-")
+
     full_output_folder = os.path.join(output_dir, subfolder)
 
     if os.path.commonpath((output_dir, os.path.abspath(full_output_folder))) != output_dir:
-        err = ("**** ERROR: Saving image outside the output folder is not allowed."
+        err = ("**** ERROR: Saving outside the output folder is not allowed."
                f"\n full_output_folder: {os.path.abspath(full_output_folder)}"
                f"\n         output_dir: {output_dir}"
                f"\n         commonpath: {os.path.commonpath((output_dir, os.path.abspath(full_output_folder)))}")
@@ -415,7 +429,7 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
         mapped_files = [map_filename(f) for f in files]
         filtered_files = [
             (digits, prefix) for digits, prefix in mapped_files
-             if os.path.normcase(prefix[:-1]) == os.path.normcase(filename) and prefix[-1] == "_"
+            if os.path.normcase(prefix[:-1]) == os.path.normcase(filename) and prefix[-1] == "_"
         ]
 
         if filtered_files:
