@@ -381,11 +381,16 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
 
         input_str = date_pattern.sub(replace_date, input_str)
 
+        now = time.localtime()
+        input_str = input_str.replace("%year%", str(now.tm_year))
+        input_str = input_str.replace("%month%", str(now.tm_mon).zfill(2))
+        input_str = input_str.replace("%day%", str(now.tm_mday).zfill(2))
+        input_str = input_str.replace("%hour%", str(now.tm_hour).zfill(2))
+        input_str = input_str.replace("%minute%", str(now.tm_min).zfill(2))
+        input_str = input_str.replace("%second%", str(now.tm_sec).zfill(2))
+
         input_str = input_str.replace("%width%", str(image_width))
         input_str = input_str.replace("%height%", str(image_height))
-
-        now = time.localtime()
-        input_str = time.strftime(input_str, now)
 
         return input_str
 
