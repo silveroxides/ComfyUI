@@ -402,7 +402,7 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
     if not subfolder and ("%date:" in filename_prefix or "%year%" in filename_prefix or
                          "%month%" in filename_prefix or "%day%" in filename_prefix or
                          "%hour%" in filename_prefix or "%minute%" in filename_prefix or
-                         "%second%" in filename_prefix):
+                         "%second%" in filename_prefix or "ComfyUI" in filename_prefix):
         import locale
         try:
             locale.setlocale(locale.LC_TIME, '')
