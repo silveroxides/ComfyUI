@@ -5,7 +5,6 @@ import re
 import time
 import mimetypes
 import logging
-import locale
 from typing import Literal
 from collections.abc import Collection
 
@@ -400,14 +399,17 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
     subfolder = os.path.dirname(os.path.normpath(filename_prefix))
     filename = os.path.basename(os.path.normpath(filename_prefix))
 
-    if not subfolder:
+    if not subfolder and ("%date:" in filename_prefix or "%year%" in filename_prefix or
+                         "%month%" in filename_prefix or "%day%" in filename_prefix or
+                         "%hour%" in filename_prefix or "%minute%" in filename_prefix or
+                         "%second%" in filename_prefix):
+        import locale
         try:
             locale.setlocale(locale.LC_TIME, '')
             default_date_format = locale.nl_langinfo(locale.D_FMT).replace("%y", "%Y")
             if os.name == 'nt':
                 default_date_format = default_date_format.replace("/", "-").replace("\\", "-").replace(":","-")
             subfolder = time.strftime(default_date_format)
-
 
         except (locale.Error, AttributeError):
             subfolder = time.strftime("%Y-%m-%d")
