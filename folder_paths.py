@@ -357,10 +357,10 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
 
     def compute_vars(input_str: str, image_width: int, image_height: int) -> str:
         date_pattern = re.compile(r'%date:(.+?)%')
-        
+
         def replace_date(match):
             date_format = match.group(1)
-            
+
             dateformat_conversion_map = {
                 "yyyy": "%Y",
                 "yy": "%y",
@@ -370,11 +370,11 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
                 "mm": "%M",
                 "ss": "%S",
             }
-            
+
             strftime_format = date_format
             for old, new in dateformat_conversion_map.items():
                 strftime_format = strftime_format.replace(old, new)
-            
+
             now = time.localtime()
             formatted_date = time.strftime(strftime_format, now)
             return formatted_date
