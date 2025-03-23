@@ -7,15 +7,18 @@ from torch import Tensor, nn
 from einops import rearrange, repeat
 import comfy.ldm.common_dit
 
-from .layers import (
-    DoubleStreamBlock,
+from comfy.ldm.flux.layers import (
     EmbedND,
-    LastLayer,
     MLPEmbedder,
-    SingleStreamBlock,
+    ModulationOut,
     timestep_embedding,
+)
+
+from .layers import (
     Approximator,
-    ModulationOut
+    DoubleStreamBlock,
+    LastLayer,
+    SingleStreamBlock,
 )
 
 
@@ -108,6 +111,7 @@ class Chroma(nn.Module):
         self.skip_mmdit = []
         self.skip_dit = []
         self.lite = False
+
     @staticmethod
     def distribute_modulations(tensor: torch.Tensor, single_block_count: int = 38, double_blocks_count: int = 19):
         """
