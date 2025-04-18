@@ -485,6 +485,49 @@ def kl_optimal_scheduler(n: int, sigma_min: float, sigma_max: float) -> torch.Te
     sigmas[:-1] = (adj_idxs * math.atan(sigma_min) + (1 - adj_idxs) * math.atan(sigma_max)).tan_()
     return sigmas
 
+def sigmoid_scheduler(model_sampling, steps: int, k: float = 0.390, base_c: float = 0.5) -> torch.Tensor:
+    total_timesteps = len(model_sampling.sigmas) - 1
+    effective_c = base_c * (steps - 1 if steps > 1 else 0)
+    k_f = float(k)
+    c_f = float(effective_c)
+
+    selected_sigmas = []
+    last_timestep = -1
+
+    for i in range(steps):
+        x = float(i)
+        normalized_value = 0.0
+        try:
+            exponent = k_f * (x - c_f)
+            if exponent > 700:
+                normalized_value = 0.0
+            elif exponent < -700:
+                normalized_value = 1.0
+            else:
+                normalized_value = 1.0 / (1.0 + math.exp(exponent))
+        except OverflowError:
+             normalized_value = 0.0 if exponent > 0 else 1.0 # Fallback
+
+        target_timestep = int(round(normalized_value * total_timesteps))
+        target_timestep = max(0, min(target_timestep, total_timesteps))
+
+        if target_timestep != last_timestep:
+            if isinstance(model_sampling.sigmas, torch.Tensor):
+                sigma_val = float(model_sampling.sigmas[target_timestep].item())
+            else:
+                sigma_val = float(model_sampling.sigmas[target_timestep])
+
+            selected_sigmas.append(sigma_val)
+            last_timestep = target_timestep
+
+    if not selected_sigmas or not math.isclose(selected_sigmas[-1], 0.0, abs_tol=1e-7):
+         selected_sigmas.append(0.0)
+    elif selected_sigmas:
+         selected_sigmas[-1] = 0.0
+
+
+    return torch.FloatTensor(selected_sigmas)
+
 def get_mask_aabb(masks):
     if masks.numel() == 0:
         return torch.zeros((0, 4), device=masks.device, dtype=torch.int)
@@ -1042,6 +1085,7 @@ SCHEDULER_HANDLERS = {
     "beta": SchedulerHandler(beta_scheduler),
     "linear_quadratic": SchedulerHandler(linear_quadratic_schedule),
     "kl_optimal": SchedulerHandler(kl_optimal_scheduler, use_ms=False),
+    "sigmoid": SchedulerHandler(sigmoid_scheduler),
 }
 SCHEDULER_NAMES = list(SCHEDULER_HANDLERS)
 

@@ -151,6 +151,25 @@ class BetaSamplingScheduler:
         sigmas = comfy.samplers.beta_scheduler(model.get_model_object("model_sampling"), steps, alpha=alpha, beta=beta)
         return (sigmas, )
 
+class SigmoidSamplingScheduler:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required":
+                    {"model": ("MODEL",),
+                     "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+                     "k": ("FLOAT", {"default": 0.390, "min": 0.0, "max": 50.0, "step":0.001, "round": False}),
+                     "base_c": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 50.0, "step":0.001, "round": False}),
+                      }
+               }
+    RETURN_TYPES = ("SIGMAS",)
+    CATEGORY = "sampling/custom_sampling/schedulers"
+
+    FUNCTION = "get_sigmas"
+
+    def get_sigmas(self, model, steps, k, base_c):
+        sigmas = comfy.samplers.sigmoid_scheduler(model.get_model_object("model_sampling"), steps, k=k, base_c=base_c)
+        return (sigmas, )
+
 class VPScheduler:
     @classmethod
     def INPUT_TYPES(s):
@@ -721,6 +740,7 @@ NODE_CLASS_MAPPINGS = {
     "LaplaceScheduler": LaplaceScheduler,
     "VPScheduler": VPScheduler,
     "BetaSamplingScheduler": BetaSamplingScheduler,
+    "SigmoidSamplingScheduler": SigmoidSamplingScheduler,
     "SDTurboScheduler": SDTurboScheduler,
     "KSamplerSelect": KSamplerSelect,
     "SamplerEulerAncestral": SamplerEulerAncestral,
