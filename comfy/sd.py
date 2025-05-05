@@ -42,6 +42,8 @@ import comfy.text_encoders.cosmos
 import comfy.text_encoders.lumina2
 import comfy.text_encoders.wan
 import comfy.text_encoders.hidream
+import comfy.text_encoders.chroma
+import comfy.text_encoders.chromaduo
 
 import comfy.model_patcher
 import comfy.lora
@@ -715,6 +717,8 @@ class CLIPType(Enum):
     WAN = 13
     HIDREAM = 14
     CHROMA = 15
+    CHROMACUSTOM = 16
+    CHROMADUO = 17
 
 
 def load_clip(ckpt_paths, embedding_directory=None, clip_type=CLIPType.STABLE_DIFFUSION, model_options={}):
@@ -830,6 +834,9 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
                 clip_target.clip = comfy.text_encoders.hidream.hidream_clip(**t5xxl_detect(clip_data),
                                                                         clip_l=False, clip_g=False, t5=True, llama=False, dtype_llama=None, llama_scaled_fp8=None)
                 clip_target.tokenizer = comfy.text_encoders.hidream.HiDreamTokenizer
+            elif clip_type == CLIPType.CHROMACUSTOM:
+                clip_target.clip = comfy.text_encoders.chroma.chroma_te(**t5xxl_detect(clip_data))
+                clip_target.tokenizer = comfy.text_encoders.chroma.ChromaT5Tokenizer
             else: #CLIPType.MOCHI
                 clip_target.clip = comfy.text_encoders.genmo.mochi_te(**t5xxl_detect(clip_data))
                 clip_target.tokenizer = comfy.text_encoders.genmo.MochiT5Tokenizer
@@ -893,6 +900,9 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
 
             clip_target.clip = comfy.text_encoders.hidream.hidream_clip(clip_l=clip_l, clip_g=clip_g, t5=t5, llama=llama, **t5_kwargs, **llama_kwargs)
             clip_target.tokenizer = comfy.text_encoders.hidream.HiDreamTokenizer
+        elif clip_type == CLIPType.CHROMADUO:
+            clip_target.clip = comfy.text_encoders.chromaduo.chromaduo_te(**t5xxl_detect(clip_data))
+            clip_target.tokenizer = comfy.text_encoders.chromaduo.ChromaDuoTokenizer
         else:
             clip_target.clip = sdxl_clip.SDXLClipModel
             clip_target.tokenizer = sdxl_clip.SDXLTokenizer
