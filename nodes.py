@@ -2061,6 +2061,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ImagePadForOutpaint": "Pad Image for Outpainting",
     "ImageBatch": "Batch Images",
     "ImageCrop": "Image Crop",
+    "ImageStitch": "Image Stitch",
     "ImageBlend": "Image Blend",
     "ImageBlur": "Image Blur",
     "ImageQuantize": "Image Quantize",
@@ -2281,6 +2282,10 @@ def init_builtin_api_nodes():
         "nodes_pixverse.py",
         "nodes_stability.py",
         "nodes_pika.py",
+        "nodes_runway.py",
+        "nodes_tripo.py",
+        "nodes_rodin.py",
+        "nodes_gemini.py",
     ]
 
     if not load_custom_node(os.path.join(api_nodes_dir, "canary.py"), module_parent="comfy_api_nodes"):
