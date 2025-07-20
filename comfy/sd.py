@@ -45,6 +45,10 @@ import comfy.text_encoders.wan
 import comfy.text_encoders.hidream
 import comfy.text_encoders.ace
 import comfy.text_encoders.omnigen2
+import comfy.text_encoders.chroma
+import comfy.text_encoders.chromaduo
+import comfy.text_encoders.clipltot5xxl
+import comfy.text_encoders.chromaunchained
 
 import comfy.model_patcher
 import comfy.lora
@@ -756,6 +760,10 @@ class CLIPType(Enum):
     CHROMA = 15
     ACE = 16
     OMNIGEN2 = 17
+    CHROMACUSTOM = 18
+    CHROMADUO = 19
+    CLIPLTOT5XXL = 20
+    CHROMAUNCHAINED = 21
 
 
 def load_clip(ckpt_paths, embedding_directory=None, clip_type=CLIPType.STABLE_DIFFUSION, model_options={}):
@@ -874,6 +882,12 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
                 clip_target.clip = comfy.text_encoders.hidream.hidream_clip(**t5xxl_detect(clip_data),
                                                                         clip_l=False, clip_g=False, t5=True, llama=False, dtype_llama=None, llama_scaled_fp8=None)
                 clip_target.tokenizer = comfy.text_encoders.hidream.HiDreamTokenizer
+            elif clip_type == CLIPType.CHROMACUSTOM:
+                clip_target.clip = comfy.text_encoders.chroma.chroma_te(clip_l=False, t5=True, **t5xxl_detect(clip_data))
+                clip_target.tokenizer = comfy.text_encoders.chroma.ChromaTokenizer
+            elif clip_type == CLIPType.CHROMAUNCHAINED:
+                clip_target.clip = comfy.text_encoders.chromaunchained.chromaunchained_te(**t5xxl_detect(clip_data))
+                clip_target.tokenizer = comfy.text_encoders.chromaunchained.ChromaUnchainedT5Tokenizer
             else: #CLIPType.MOCHI
                 clip_target.clip = comfy.text_encoders.genmo.mochi_te(**t5xxl_detect(clip_data))
                 clip_target.tokenizer = comfy.text_encoders.genmo.MochiT5Tokenizer
@@ -904,7 +918,10 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
             clip_target.tokenizer = comfy.text_encoders.omnigen2.Omnigen2Tokenizer
         else:
             # clip_l
-            if clip_type == CLIPType.SD3:
+            if clip_type == CLIPType.CHROMACUSTOM:
+                clip_target.clip = comfy.text_encoders.chroma.chroma_te(clip_l=True, t5=False)
+                clip_target.tokenizer = comfy.text_encoders.chroma.ChromaTokenizer
+            elif clip_type == CLIPType.SD3:
                 clip_target.clip = comfy.text_encoders.sd3_clip.sd3_clip(clip_l=True, clip_g=False, t5=False)
                 clip_target.tokenizer = comfy.text_encoders.sd3_clip.SD3Tokenizer
             elif clip_type == CLIPType.HIDREAM:
@@ -914,7 +931,11 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
                 clip_target.clip = sd1_clip.SD1ClipModel
                 clip_target.tokenizer = sd1_clip.SD1Tokenizer
     elif len(clip_data) == 2:
-        if clip_type == CLIPType.SD3:
+        if clip_type == CLIPType.CHROMACUSTOM:
+            te_models = [detect_te_model(clip_data[0]), detect_te_model(clip_data[1])]
+            clip_target.clip = comfy.text_encoders.chroma.chroma_te(clip_l=TEModel.CLIP_L in te_models, t5=TEModel.T5_XXL in te_models, **t5xxl_detect(clip_data))
+            clip_target.tokenizer = comfy.text_encoders.chroma.ChromaTokenizer
+        elif clip_type == CLIPType.SD3:
             te_models = [detect_te_model(clip_data[0]), detect_te_model(clip_data[1])]
             clip_target.clip = comfy.text_encoders.sd3_clip.sd3_clip(clip_l=TEModel.CLIP_L in te_models, clip_g=TEModel.CLIP_G in te_models, t5=TEModel.T5_XXL in te_models, **t5xxl_detect(clip_data))
             clip_target.tokenizer = comfy.text_encoders.sd3_clip.SD3Tokenizer
@@ -945,6 +966,12 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
 
             clip_target.clip = comfy.text_encoders.hidream.hidream_clip(clip_l=clip_l, clip_g=clip_g, t5=t5, llama=llama, **t5_kwargs, **llama_kwargs)
             clip_target.tokenizer = comfy.text_encoders.hidream.HiDreamTokenizer
+        elif clip_type == CLIPType.CHROMADUO:
+            clip_target.clip = comfy.text_encoders.chromaduo.chromaduo_te(**t5xxl_detect(clip_data))
+            clip_target.tokenizer = comfy.text_encoders.chromaduo.ChromaDuoTokenizer
+        elif clip_type == CLIPType.CLIPLTOT5XXL:
+            clip_target.clip = comfy.text_encoders.clipltot5xxl.clipltot5xxl_te(**t5xxl_detect(clip_data))
+            clip_target.tokenizer = comfy.text_encoders.clipltot5xxl.ClipLtoT5xxlTokenizer
         else:
             clip_target.clip = sdxl_clip.SDXLClipModel
             clip_target.tokenizer = sdxl_clip.SDXLTokenizer
