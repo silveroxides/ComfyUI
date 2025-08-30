@@ -1,11 +1,13 @@
-#Original code can be found on: https://github.com/black-forest-labs/flux
+# Credits:
+# Original Flux code can be found on: https://github.com/black-forest-labs/flux
+# Chroma Radiance adaption referenced from https://github.com/lodestone-rock/flow
 
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 from torch import Tensor, nn
-from einops import rearrange, repeat
-import comfy.patcher_extension
+from einops import repeat
 import comfy.ldm.common_dit
 
 from comfy.ldm.flux.layers import (
@@ -15,44 +17,39 @@ from comfy.ldm.flux.layers import (
 
 from .layers import (
     DoubleStreamBlock,
-    LastLayer,
     SingleStreamBlock,
     Approximator,
-    ChromaModulationOut,
+)
+from .layers_dct import (
+    NerfEmbedder,
+    NerfGLUBlock,
+    NerfFinalLayer,
+    NerfFinalLayerConv,
 )
 
+from . import model as chroma_model
 
 @dataclass
-class ChromaParams:
-    in_channels: int
-    out_channels: int
-    context_in_dim: int
-    hidden_size: int
-    mlp_ratio: float
-    num_heads: int
-    depth: int
-    depth_single_blocks: int
-    axes_dim: list
-    theta: int
+class ChromaRadianceParams(chroma_model.ChromaParams):
     patch_size: int
-    qkv_bias: bool
-    in_dim: int
-    out_dim: int
-    hidden_dim: int
-    n_layers: int
+    nerf_hidden_size: int
+    nerf_mlp_ratio: int
+    nerf_depth: int
+    nerf_max_freqs: int
+    nerf_tile_size: int
+    nerf_final_head_type: str
+    nerf_embedder_dtype: Optional[torch.dtype]
 
 
-
-
-class Chroma(nn.Module):
+class ChromaRadiance(chroma_model.Chroma):
     """
     Transformer model for flow matching on sequences.
     """
 
     def __init__(self, image_model=None, final_layer=True, dtype=None, device=None, operations=None, **kwargs):
-        super().__init__()
+        nn.Module.__init__(self)
         self.dtype = dtype
-        params = ChromaParams(**kwargs)
+        params = ChromaRadianceParams(**kwargs)
         self.params = params
         self.patch_size = params.patch_size
         self.in_channels = params.in_channels
@@ -71,7 +68,15 @@ class Chroma(nn.Module):
         self.hidden_dim = params.hidden_dim
         self.n_layers = params.n_layers
         self.pe_embedder = EmbedND(dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim)
-        self.img_in = operations.Linear(self.in_channels, self.hidden_size, bias=True, dtype=dtype, device=device)
+        self.img_in_patch = operations.Conv2d(
+            params.in_channels,
+            params.hidden_size,
+            kernel_size=params.patch_size,
+            stride=params.patch_size,
+            bias=True,
+            dtype=dtype,
+            device=device,
+        )
         self.txt_in = operations.Linear(params.context_in_dim, self.hidden_size, dtype=dtype, device=device)
         # set as nn identity for now, will overwrite it later.
         self.distilled_guidance_layer = Approximator(
@@ -98,45 +103,115 @@ class Chroma(nn.Module):
 
         self.single_blocks = nn.ModuleList(
             [
-                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio, dtype=dtype, device=device, operations=operations)
+                SingleStreamBlock(
+                    self.hidden_size,
+                    self.num_heads,
+                    mlp_ratio=params.mlp_ratio,
+                    dtype=dtype, device=device, operations=operations,
+                )
                 for _ in range(params.depth_single_blocks)
             ]
         )
 
-        if final_layer:
-            self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels, dtype=dtype, device=device, operations=operations)
+        # pixel channel concat with DCT
+        self.nerf_image_embedder = NerfEmbedder(
+            in_channels=params.in_channels,
+            hidden_size_input=params.nerf_hidden_size,
+            max_freqs=params.nerf_max_freqs,
+            dtype=dtype,
+            device=device,
+            operations=operations,
+            embedder_dtype=params.nerf_embedder_dtype,
+        )
+
+        self.nerf_blocks = nn.ModuleList([
+            NerfGLUBlock(
+                hidden_size_s=params.hidden_size,
+                hidden_size_x=params.nerf_hidden_size,
+                mlp_ratio=params.nerf_mlp_ratio,
+                dtype=dtype,
+                device=device,
+                operations=operations,
+            ) for _ in range(params.nerf_depth)
+        ])
+
+        if params.nerf_final_head_type == "linear":
+            self.nerf_final_layer = NerfFinalLayer(
+                params.nerf_hidden_size,
+                out_channels=params.in_channels,
+                dtype=dtype,
+                device=device,
+                operations=operations,
+            )
+        elif params.nerf_final_head_type == "conv":
+            self.nerf_final_layer_conv = NerfFinalLayerConv(
+                params.nerf_hidden_size,
+                out_channels=params.in_channels,
+                dtype=dtype,
+                device=device,
+                operations=operations,
+            )
+        else:
+            errstr = f"Unsupported nerf_final_head_type {params.nerf_final_head_type}"
+            raise ValueError(errstr)
 
         self.skip_mmdit = []
         self.skip_dit = []
         self.lite = False
 
-    def get_modulations(self, tensor: torch.Tensor, block_type: str, *, idx: int = 0):
-        # This function slices up the modulations tensor which has the following layout:
-        #   single     : num_single_blocks * 3 elements
-        #   double_img : num_double_blocks * 6 elements
-        #   double_txt : num_double_blocks * 6 elements
-        #   final      : 2 elements
-        if block_type == "final":
-            return (tensor[:, -2:-1, :], tensor[:, -1:, :])
-        single_block_count = self.params.depth_single_blocks
-        double_block_count = self.params.depth
-        offset = 3 * idx
-        if block_type == "single":
-            return ChromaModulationOut.from_offset(tensor, offset)
-        # Double block modulations are 6 elements so we double 3 * idx.
-        offset *= 2
-        if block_type in {"double_img", "double_txt"}:
-            # Advance past the single block modulations.
-            offset += 3 * single_block_count
-            if block_type == "double_txt":
-                # Advance past the double block img modulations.
-                offset += 6 * double_block_count
-            return (
-                ChromaModulationOut.from_offset(tensor, offset),
-                ChromaModulationOut.from_offset(tensor, offset + 3),
-            )
-        raise ValueError("Bad block_type")
+    @property
+    def _nerf_final_layer(self) -> nn.Module:
+        if self.params.nerf_final_head_type == "linear":
+            return self.nerf_final_layer
+        if self.params.nerf_final_head_type == "conv":
+            return self.nerf_final_layer_conv
+        # Impossible to get here as we raise an error on unexpected types on initialization.
+        raise NotImplementedError
 
+    def forward_tiled_nerf(
+        self,
+        nerf_hidden: Tensor,
+        nerf_pixels: Tensor,
+        B: int,
+        C: int,
+        num_patches: int,
+        tile_size: int = 16
+    ) -> Tensor:
+        """
+        Processes the NeRF head in tiles to save memory.
+        nerf_hidden has shape [B, L, D]
+        nerf_pixels has shape [B, L, C * P * P]
+        """
+        output_tiles = []
+        # Iterate over the patches in tiles. The dimension L (num_patches) is at index 1.
+        for i in range(0, num_patches, tile_size):
+            #
+            end = min(i + tile_size, num_patches)
+
+            # Slice the current tile from the input tensors
+            nerf_hidden_tile = nerf_hidden[:, i:end, :]
+            nerf_pixels_tile = nerf_pixels[:, i:end, :]
+
+            # Get the actual number of patches in this tile (can be smaller for the last tile)
+            num_patches_tile = nerf_hidden_tile.shape[1]
+
+            # Reshape the tile for per-patch processing
+            # [B, NumPatches_tile, D] -> [B * NumPatches_tile, D]
+            nerf_hidden_tile = nerf_hidden_tile.reshape(B * num_patches_tile, self.params.hidden_size)
+            # [B, NumPatches_tile, C*P*P] -> [B*NumPatches_tile, C, P*P] -> [B*NumPatches_tile, P*P, C]
+            nerf_pixels_tile = nerf_pixels_tile.reshape(B * num_patches_tile, C, self.params.patch_size**2).transpose(1, 2)
+
+            # get DCT-encoded pixel embeddings [pixel-dct]
+            img_dct_tile = self.nerf_image_embedder(nerf_pixels_tile)
+
+            # pass through the dynamic MLP blocks (the NeRF)
+            for block in self.nerf_blocks:
+                img_dct_tile = block(img_dct_tile, nerf_hidden_tile)
+
+            output_tiles.append(img_dct_tile)
+
+        # Concatenate the processed tiles along the patch dimension
+        return torch.cat(output_tiles, dim=0)
 
     def forward_orig(
         self,
@@ -151,11 +226,23 @@ class Chroma(nn.Module):
         attn_mask: Tensor = None,
     ) -> Tensor:
         patches_replace = transformer_options.get("patches_replace", {})
-        if img.ndim != 3 or txt.ndim != 3:
-            raise ValueError("Input img and txt tensors must have 3 dimensions.")
+        if img.ndim != 4:
+            raise ValueError("Input img tensor must be in [B, C, H, W] format.")
+        if txt.ndim != 3:
+            raise ValueError("Input txt tensors must have 3 dimensions.")
+        B, C, H, W = img.shape
 
-        # running on sequences img
-        img = self.img_in(img)
+        # gemini gogogo idk how to unfold and pack the patch properly :P
+        # Store the raw pixel values of each patch for the NeRF head later.
+        # unfold creates patches: [B, C * P * P, NumPatches]
+        nerf_pixels = nn.functional.unfold(img, kernel_size=self.params.patch_size, stride=self.params.patch_size)
+        nerf_pixels = nerf_pixels.transpose(1, 2) # -> [B, NumPatches, C * P * P]
+
+        # partchify ops
+        img = self.img_in_patch(img) # -> [B, Hidden, H/P, W/P]
+        num_patches = img.shape[2] * img.shape[3]
+        # flatten into a sequence for the transformer.
+        img = img.flatten(2).transpose(1, 2) # -> [B, NumPatches, Hidden]
 
         # distilled vector guidance
         mod_index_length = 344
@@ -249,22 +336,26 @@ class Chroma(nn.Module):
                             img[:, txt.shape[1] :, ...] += add
 
         img = img[:, txt.shape[1] :, ...]
-        final_mod = self.get_modulations(mod_vectors, "final")
-        img = self.final_layer(img, vec=final_mod)  # (N, T, patch_size ** 2 * out_channels)
-        return img
 
-    def forward(self, x, timestep, context, guidance, control=None, transformer_options={}, **kwargs):
-        return comfy.patcher_extension.WrapperExecutor.new_class_executor(
-            self._forward,
-            self,
-            comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, transformer_options)
-        ).execute(x, timestep, context, guidance, control, transformer_options, **kwargs)
+        img_dct = self.forward_tiled_nerf(img, nerf_pixels, B, C, num_patches, tile_size=self.params.nerf_tile_size)
+
+        # gemini gogogo idk how to fold this properly :P
+        # Reassemble the patches into the final image.
+        img_dct = img_dct.transpose(1, 2) # -> [B*NumPatches, C, P*P]
+        # Reshape to combine with batch dimension for fold
+        img_dct = img_dct.reshape(B, num_patches, -1) # -> [B, NumPatches, C*P*P]
+        img_dct = img_dct.transpose(1, 2) # -> [B, C*P*P, NumPatches]
+        img_dct = nn.functional.fold(
+            img_dct,
+            output_size=(H, W),
+            kernel_size=self.params.patch_size,
+            stride=self.params.patch_size
+        )
+        return self._nerf_final_layer(img_dct)
 
     def _forward(self, x, timestep, context, guidance, control=None, transformer_options={}, **kwargs):
         bs, c, h, w = x.shape
-        x = comfy.ldm.common_dit.pad_to_patch_size(x, (self.patch_size, self.patch_size))
-
-        img = rearrange(x, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=self.patch_size, pw=self.patch_size)
+        img = comfy.ldm.common_dit.pad_to_patch_size(x, (self.patch_size, self.patch_size))
 
         h_len = ((h + (self.patch_size // 2)) // self.patch_size)
         w_len = ((w + (self.patch_size // 2)) // self.patch_size)
@@ -272,7 +363,6 @@ class Chroma(nn.Module):
         img_ids[:, :, 1] = img_ids[:, :, 1] + torch.linspace(0, h_len - 1, steps=h_len, device=x.device, dtype=x.dtype).unsqueeze(1)
         img_ids[:, :, 2] = img_ids[:, :, 2] + torch.linspace(0, w_len - 1, steps=w_len, device=x.device, dtype=x.dtype).unsqueeze(0)
         img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs)
-
         txt_ids = torch.zeros((bs, context.shape[1], 3), device=x.device, dtype=x.dtype)
-        out = self.forward_orig(img, img_ids, context, txt_ids, timestep, guidance, control, transformer_options, attn_mask=kwargs.get("attention_mask", None))
-        return rearrange(out, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=h_len, w=w_len, ph=self.patch_size, pw=self.patch_size)[:,:,:h,:w]
+
+        return self.forward_orig(img, img_ids, context, txt_ids, timestep, guidance, control, transformer_options, attn_mask=kwargs.get("attention_mask", None))
