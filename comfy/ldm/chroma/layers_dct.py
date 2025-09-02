@@ -6,6 +6,7 @@ from torch import nn
 
 from comfy.ldm.flux.layers import RMSNorm
 
+
 class NerfEmbedder(nn.Module):
     """
     An embedder module that combines input features with a 2D positional
@@ -15,7 +16,7 @@ class NerfEmbedder(nn.Module):
     patch size, and enriches it with positional information before projecting
     it to a new hidden size.
     """
-    def __init__(self, in_channels, hidden_size_input, max_freqs, dtype=None, device=None, operations=None, *, embedder_dtype=None):
+    def __init__(self, in_channels, hidden_size_input, max_freqs, dtype=None, device=None, operations=None):
         """
         Initializes the NerfEmbedder.
 
@@ -29,7 +30,6 @@ class NerfEmbedder(nn.Module):
         super().__init__()
         self.max_freqs = max_freqs
         self.hidden_size_input = hidden_size_input
-        self.embedder_dtype = embedder_dtype
 
         # A linear layer to project the concatenated input features and
         # positional encodings to the final output dimension.
@@ -92,7 +92,7 @@ class NerfEmbedder(nn.Module):
 
         return dct
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+    def forward(self, inputs: torch.Tensor, embedder_dtype: torch.dtype) -> torch.Tensor:
         """
         Forward pass for the embedder.
 
@@ -110,13 +110,13 @@ class NerfEmbedder(nn.Module):
 
         # Possibly run the operation with a different dtype.
         orig_dtype = inputs.dtype
-        if self.embedder_dtype is not None and self.embedder_dtype != orig_dtype:
-            embedder = self.embedder.to(dtype=self.embedder_dtype)
+        if embedder_dtype != orig_dtype:
+            embedder = self.embedder.to(dtype=embedder_dtype)
         else:
             embedder = self.embedder
 
         # Fetch the pre-computed or cached positional embeddings.
-        dct = self.fetch_pos(patch_size, inputs.device, self.embedder_dtype or inputs.dtype)
+        dct = self.fetch_pos(patch_size, inputs.device, embedder_dtype)
 
         # Repeat the positional embeddings for each item in the batch.
         dct = dct.repeat(B, 1, 1)
@@ -130,6 +130,7 @@ class NerfEmbedder(nn.Module):
 
         # No-op if already the same dtype.
         return inputs.to(dtype=orig_dtype)
+
 
 class NerfGLUBlock(nn.Module):
     """
@@ -182,6 +183,7 @@ class NerfFinalLayer(nn.Module):
         # RMSNorm normalizes over the last dimension, but our channel dim (C) is at dim=1.
         # So we temporarily move the channel dimension to the end for the norm operation.
         return self.linear(self.norm(x.movedim(1, -1))).movedim(-1, 1)
+
 
 class NerfFinalLayerConv(nn.Module):
     def __init__(self, hidden_size, out_channels, dtype=None, device=None, operations=None):
