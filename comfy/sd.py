@@ -289,6 +289,7 @@ class VAE:
         self.process_output = lambda image: torch.clamp((image + 1.0) / 2.0, min=0.0, max=1.0)
         self.working_dtypes = [torch.bfloat16, torch.float32]
         self.disable_offload = False
+        self.not_video = False
 
         self.downscale_index_formula = None
         self.upscale_index_formula = None
@@ -413,6 +414,23 @@ class VAE:
                 self.downscale_ratio = (lambda a: max(0, math.floor((a + 7) / 8)), 32, 32)
                 self.downscale_index_formula = (8, 32, 32)
                 self.working_dtypes = [torch.bfloat16, torch.float32]
+            elif "decoder.conv_in.conv.weight" in sd and sd['decoder.conv_in.conv.weight'].shape[1] == 32:
+                ddconfig = {"block_out_channels": [128, 256, 512, 1024, 1024], "in_channels": 3, "out_channels": 3, "num_res_blocks": 2, "ffactor_spatial": 16, "ffactor_temporal": 4, "downsample_match_channel": True, "upsample_match_channel": True}
+                ddconfig['z_channels'] = sd["decoder.conv_in.conv.weight"].shape[1]
+                self.latent_channels = 64
+                self.upscale_ratio = (lambda a: max(0, a * 4 - 3), 16, 16)
+                self.upscale_index_formula = (4, 16, 16)
+                self.downscale_ratio = (lambda a: max(0, math.floor((a + 3) / 4)), 16, 16)
+                self.downscale_index_formula = (4, 16, 16)
+                self.latent_dim = 3
+                self.not_video = True
+                self.working_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+                self.first_stage_model = AutoencodingEngine(regularizer_config={'target': "comfy.ldm.models.autoencoder.EmptyRegularizer"},
+                                                            encoder_config={'target': "comfy.ldm.hunyuan_video.vae_refiner.Encoder", 'params': ddconfig},
+                                                            decoder_config={'target': "comfy.ldm.hunyuan_video.vae_refiner.Decoder", 'params': ddconfig})
+
+                self.memory_used_encode = lambda shape, dtype: (1400 * shape[-2] * shape[-1]) * model_management.dtype_size(dtype)
+                self.memory_used_decode = lambda shape, dtype: (1400 * shape[-3] * shape[-2] * shape[-1] * 16 * 16) * model_management.dtype_size(dtype)
             elif "decoder.conv_in.conv.weight" in sd:
                 ddconfig = {'double_z': True, 'z_channels': 4, 'resolution': 256, 'in_channels': 3, 'out_ch': 3, 'ch': 128, 'ch_mult': [1, 2, 4, 4], 'num_res_blocks': 2, 'attn_resolutions': [], 'dropout': 0.0}
                 ddconfig["conv3d"] = True
@@ -674,7 +692,10 @@ class VAE:
         pixel_samples = self.vae_encode_crop_pixels(pixel_samples)
         pixel_samples = pixel_samples.movedim(-1, 1)
         if self.latent_dim == 3 and pixel_samples.ndim < 5:
-            pixel_samples = pixel_samples.movedim(1, 0).unsqueeze(0)
+            if not self.not_video:
+                pixel_samples = pixel_samples.movedim(1, 0).unsqueeze(0)
+            else:
+                pixel_samples = pixel_samples.unsqueeze(2)
         try:
             memory_used = self.memory_used_encode(pixel_samples.shape, self.vae_dtype)
             model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
@@ -708,7 +729,10 @@ class VAE:
         dims = self.latent_dim
         pixel_samples = pixel_samples.movedim(-1, 1)
         if dims == 3:
-            pixel_samples = pixel_samples.movedim(1, 0).unsqueeze(0)
+            if not self.not_video:
+                pixel_samples = pixel_samples.movedim(1, 0).unsqueeze(0)
+            else:
+                pixel_samples = pixel_samples.unsqueeze(2)
 
         memory_used = self.memory_used_encode(pixel_samples.shape, self.vae_dtype)  # TODO: calculate mem required for tile
         model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
@@ -764,6 +788,66 @@ class VAE:
             return round(self.upscale_ratio[0](8192) / 8192)
         except:
             return None
+
+# "Fake" VAE that converts from IMAGE B, H, W, C and values on the scale of 0..1
+# to LATENT B, C, H, W and values on the scale of -1..1.
+class PixelspaceConversionVAE:
+    def __init__(self, size_increment: int=16):
+        self.intermediate_device = comfy.model_management.intermediate_device()
+        self.size_increment = size_increment
+
+    def vae_encode_crop_pixels(self, pixels: torch.Tensor) -> torch.Tensor:
+        if self.size_increment == 1:
+            return pixels
+        dims = pixels.shape[1:-1]
+        for d in range(len(dims)):
+            d_adj = (dims[d] // self.size_increment) * self.size_increment
+            if d_adj == d:
+                continue
+            d_offset = (dims[d] % self.size_increment) // 2
+            pixels = pixels.narrow(d + 1, d_offset, d_adj)
+        return pixels
+
+    def encode(self, pixels: torch.Tensor, *_args, **_kwargs) -> torch.Tensor:
+        if pixels.ndim == 3:
+            pixels = pixels.unsqueeze(0)
+        elif pixels.ndim != 4:
+            raise ValueError("Unexpected input image shape")
+        # Ensure the image has spatial dimensions that are multiples of 16.
+        pixels = self.vae_encode_crop_pixels(pixels)
+        h, w, c = pixels.shape[1:]
+        if h < self.size_increment or w < self.size_increment:
+            raise ValueError(f"Image inputs must have height/width of at least {self.size_increment} pixel(s).")
+        pixels= pixels[..., :3]
+        if c == 1:
+            pixels = pixels.expand(-1, -1, -1, 3)
+        elif c != 3:
+            raise ValueError("Unexpected number of channels in input image")
+        # Rescale to -1..1 and move the channel dimension to position 1.
+        latent = pixels.to(device=self.intermediate_device, dtype=torch.float32, copy=True)
+        latent = latent.clamp_(0, 1).movedim(-1, 1).contiguous()
+        latent -= 0.5
+        latent *= 2
+        return latent.clamp_(-1, 1)
+
+    def decode(self, samples: torch.Tensor, *_args, **_kwargs) -> torch.Tensor:
+        # Rescale to 0..1 and move the channel dimension to the end.
+        img = samples.to(device=self.intermediate_device, dtype=torch.float32, copy=True)
+        img = img.clamp_(-1, 1).movedim(1, -1).contiguous()
+        img += 1.0
+        img *= 0.5
+        return img.clamp_(0, 1)
+
+    encode_tiled = encode
+    decode_tiled = decode
+
+    @classmethod
+    def spacial_compression_decode(cls) -> int:
+        # This just exists so the tiled VAE nodes don't crash.
+        return 1
+
+    spacial_compression_encode = spacial_compression_decode
+    temporal_compression_decode = spacial_compression_decode
 
 class StyleModel:
     def __init__(self, model, device="cpu"):
