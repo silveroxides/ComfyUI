@@ -2,10 +2,11 @@
 # Original Flux code can be found on: https://github.com/black-forest-labs/flux
 # Chroma Radiance adaption referenced from https://github.com/lodestone-rock/flow
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 from einops import repeat
 import comfy.ldm.common_dit
@@ -33,12 +34,14 @@ class ChromaRadianceParams(ChromaParams):
     nerf_mlp_ratio: int
     nerf_depth: int
     nerf_max_freqs: int
-    # Setting nerf_tile_size to 0 disables tiling.
     nerf_tile_size: int
-    # Currently one of linear (legacy) or conv.
     nerf_final_head_type: str
-    # None means use the same dtype as the model.
     nerf_embedder_dtype: Optional[torch.dtype]
+
+    grid_mitigation_enabled: bool = field(default=False)
+    mitigation_start_sigma: float = field(default=0.5)
+    num_offsets: int = field(default=1)
+    offset_size: int = field(default=15)
 
 
 class ChromaRadiance(Chroma):
@@ -51,6 +54,12 @@ class ChromaRadiance(Chroma):
             raise RuntimeError("Attempt to create ChromaRadiance object without setting operations")
         nn.Module.__init__(self)
         self.dtype = dtype
+
+        kwargs.setdefault('grid_mitigation_enabled', False)
+        kwargs.setdefault('mitigation_start_sigma', 0.5)
+        kwargs.setdefault('num_offsets', 1)
+        kwargs.setdefault('offset_size', kwargs.get('patch_size', 16) - 1)
+
         params = ChromaRadianceParams(**kwargs)
         self.params = params
         self.patch_size = params.patch_size
@@ -80,7 +89,6 @@ class ChromaRadiance(Chroma):
             device=device,
         )
         self.txt_in = operations.Linear(params.context_in_dim, self.hidden_size, dtype=dtype, device=device)
-        # set as nn identity for now, will overwrite it later.
         self.distilled_guidance_layer = Approximator(
                     in_dim=self.in_dim,
                     hidden_dim=self.hidden_dim,
@@ -88,8 +96,6 @@ class ChromaRadiance(Chroma):
                     n_layers=self.n_layers,
                     dtype=dtype, device=device, operations=operations
                 )
-
-
         self.double_blocks = nn.ModuleList(
             [
                 DoubleStreamBlock(
@@ -102,7 +108,6 @@ class ChromaRadiance(Chroma):
                 for _ in range(params.depth)
             ]
         )
-
         self.single_blocks = nn.ModuleList(
             [
                 SingleStreamBlock(
@@ -114,8 +119,6 @@ class ChromaRadiance(Chroma):
                 for _ in range(params.depth_single_blocks)
             ]
         )
-
-        # pixel channel concat with DCT
         self.nerf_image_embedder = NerfEmbedder(
             in_channels=params.in_channels,
             hidden_size_input=params.nerf_hidden_size,
@@ -124,7 +127,6 @@ class ChromaRadiance(Chroma):
             device=device,
             operations=operations,
         )
-
         self.nerf_blocks = nn.ModuleList([
             NerfGLUBlock(
                 hidden_size_s=params.hidden_size,
@@ -135,7 +137,6 @@ class ChromaRadiance(Chroma):
                 operations=operations,
             ) for _ in range(params.nerf_depth)
         ])
-
         if params.nerf_final_head_type == "linear":
             self.nerf_final_layer = NerfFinalLayer(
                 params.nerf_hidden_size,
@@ -153,9 +154,7 @@ class ChromaRadiance(Chroma):
                 operations=operations,
             )
         else:
-            errstr = f"Unsupported nerf_final_head_type {params.nerf_final_head_type}"
-            raise ValueError(errstr)
-
+            raise ValueError(f"Unsupported nerf_final_head_type {params.nerf_final_head_type}")
         self.skip_mmdit = []
         self.skip_dit = []
         self.lite = False
@@ -166,51 +165,30 @@ class ChromaRadiance(Chroma):
             return self.nerf_final_layer
         if self.params.nerf_final_head_type == "conv":
             return self.nerf_final_layer_conv
-        # Impossible to get here as we raise an error on unexpected types on initialization.
         raise NotImplementedError
 
     def img_in(self, img: Tensor) -> Tensor:
-        img = self.img_in_patch(img) # -> [B, Hidden, H/P, W/P]
-        # flatten into a sequence for the transformer.
-        return img.flatten(2).transpose(1, 2) # -> [B, NumPatches, Hidden]
+        img = self.img_in_patch(img)
+        return img.flatten(2).transpose(1, 2)
 
-    def forward_nerf(
-        self,
-        img_orig: Tensor,
-        img_out: Tensor,
-        params: ChromaRadianceParams,
-    ) -> Tensor:
+    def forward_nerf(self, img_orig: Tensor, img_out: Tensor, params: ChromaRadianceParams) -> Tensor:
         B, C, H, W = img_orig.shape
         num_patches = img_out.shape[1]
         patch_size = params.patch_size
-
-        # Store the raw pixel values of each patch for the NeRF head later.
-        # unfold creates patches: [B, C * P * P, NumPatches]
-        nerf_pixels = nn.functional.unfold(img_orig, kernel_size=patch_size, stride=patch_size)
-        nerf_pixels = nerf_pixels.transpose(1, 2) # -> [B, NumPatches, C * P * P]
-
+        nerf_pixels = F.unfold(img_orig, kernel_size=patch_size, stride=patch_size)
+        nerf_pixels = nerf_pixels.transpose(1, 2)
         if params.nerf_tile_size > 0 and num_patches > params.nerf_tile_size:
-            # Enable tiling if nerf_tile_size isn't 0 and we actually have more patches than
-            # the tile size.
             img_dct = self.forward_tiled_nerf(img_out, nerf_pixels, B, C, num_patches, patch_size, params)
         else:
-            # Reshape for per-patch processing
             nerf_hidden = img_out.reshape(B * num_patches, params.hidden_size)
             nerf_pixels = nerf_pixels.reshape(B * num_patches, C, patch_size**2).transpose(1, 2)
-
-            # Get DCT-encoded pixel embeddings [pixel-dct]
             img_dct = self.nerf_image_embedder(nerf_pixels)
-
-            # Pass through the dynamic MLP blocks (the NeRF)
             for block in self.nerf_blocks:
                 img_dct = block(img_dct, nerf_hidden)
-
-        # Reassemble the patches into the final image.
-        img_dct = img_dct.transpose(1, 2) # -> [B*NumPatches, C, P*P]
-        # Reshape to combine with batch dimension for fold
-        img_dct = img_dct.reshape(B, num_patches, -1) # -> [B, NumPatches, C*P*P]
-        img_dct = img_dct.transpose(1, 2) # -> [B, C*P*P, NumPatches]
-        img_dct = nn.functional.fold(
+        img_dct = img_dct.transpose(1, 2)
+        img_dct = img_dct.reshape(B, num_patches, -1)
+        img_dct = img_dct.transpose(1, 2)
+        img_dct = F.fold(
             img_dct,
             output_size=(H, W),
             kernel_size=patch_size,
@@ -218,50 +196,20 @@ class ChromaRadiance(Chroma):
         )
         return self._nerf_final_layer(img_dct)
 
-    def forward_tiled_nerf(
-        self,
-        nerf_hidden: Tensor,
-        nerf_pixels: Tensor,
-        batch: int,
-        channels: int,
-        num_patches: int,
-        patch_size: int,
-        params: ChromaRadianceParams,
-    ) -> Tensor:
-        """
-        Processes the NeRF head in tiles to save memory.
-        nerf_hidden has shape [B, L, D]
-        nerf_pixels has shape [B, L, C * P * P]
-        """
+    def forward_tiled_nerf(self, nerf_hidden: Tensor, nerf_pixels: Tensor, batch: int, channels: int, num_patches: int, patch_size: int, params: ChromaRadianceParams) -> Tensor:
         tile_size = params.nerf_tile_size
         output_tiles = []
-        # Iterate over the patches in tiles. The dimension L (num_patches) is at index 1.
         for i in range(0, num_patches, tile_size):
             end = min(i + tile_size, num_patches)
-
-            # Slice the current tile from the input tensors
             nerf_hidden_tile = nerf_hidden[:, i:end, :]
             nerf_pixels_tile = nerf_pixels[:, i:end, :]
-
-            # Get the actual number of patches in this tile (can be smaller for the last tile)
             num_patches_tile = nerf_hidden_tile.shape[1]
-
-            # Reshape the tile for per-patch processing
-            # [B, NumPatches_tile, D] -> [B * NumPatches_tile, D]
             nerf_hidden_tile = nerf_hidden_tile.reshape(batch * num_patches_tile, params.hidden_size)
-            # [B, NumPatches_tile, C*P*P] -> [B*NumPatches_tile, C, P*P] -> [B*NumPatches_tile, P*P, C]
             nerf_pixels_tile = nerf_pixels_tile.reshape(batch * num_patches_tile, channels, patch_size**2).transpose(1, 2)
-
-            # get DCT-encoded pixel embeddings [pixel-dct]
             img_dct_tile = self.nerf_image_embedder(nerf_pixels_tile)
-
-            # pass through the dynamic MLP blocks (the NeRF)
             for block in self.nerf_blocks:
                 img_dct_tile = block(img_dct_tile, nerf_hidden_tile)
-
             output_tiles.append(img_dct_tile)
-
-        # Concatenate the processed tiles along the patch dimension
         return torch.cat(output_tiles, dim=0)
 
     def radiance_get_override_params(self, overrides: dict) -> ChromaRadianceParams:
@@ -272,51 +220,30 @@ class ChromaRadiance(Chroma):
         nullable_keys = frozenset(("nerf_embedder_dtype",))
         bad_keys = tuple(k for k in overrides if k not in params_dict)
         if bad_keys:
-            e = f"Unknown key(s) in transformer_options chroma_radiance_options: {', '.join(bad_keys)}"
-            raise ValueError(e)
-        bad_keys = tuple(
-            k
-            for k, v in overrides.items()
-            if type(v) != type(getattr(params, k)) and (v is not None or k not in nullable_keys)
-        )
+            raise ValueError(f"Unknown key(s) in transformer_options chroma_radiance_options: {', '.join(bad_keys)}")
+        bad_keys = tuple(k for k, v in overrides.items() if type(v) != type(getattr(params, k)) and (v is not None or k not in nullable_keys))
         if bad_keys:
-            e = f"Invalid value(s) in transformer_options chroma_radiance_options: {', '.join(bad_keys)}"
-            raise ValueError(e)
-        # At this point it's all valid keys and values so we can merge with the existing params.
+            raise ValueError(f"Invalid value(s) in transformer_options chroma_radiance_options: {', '.join(bad_keys)}")
         params_dict |= overrides
         return params.__class__(**params_dict)
 
-    def _forward(
-        self,
-        x: Tensor,
-        timestep: Tensor,
-        context: Tensor,
-        guidance: Optional[Tensor],
-        control: Optional[dict]=None,
-        transformer_options: dict={},
-        **kwargs: dict,
-    ) -> Tensor:
-        bs, c, h, w = x.shape
-        img = comfy.ldm.common_dit.pad_to_patch_size(x, (self.patch_size, self.patch_size))
+    @staticmethod
+    def _extract_crop_position_ids(full_img_ids, offset_y, offset_x, crop_height, crop_width, patch_size=16):
+        batch_size = full_img_ids.shape[0]
+        full_side_patches = int(full_img_ids.shape[1] ** 0.5)
+        patch_offset_y = offset_y // patch_size
+        patch_offset_x = offset_x // patch_size
+        crop_patch_height = crop_height // patch_size
+        crop_patch_width = crop_width // patch_size
+        spatial_ids = full_img_ids.view(batch_size, full_side_patches, full_side_patches, 3)
+        crop_ids = spatial_ids[:, patch_offset_y:patch_offset_y + crop_patch_height, patch_offset_x:patch_offset_x + crop_patch_width, :]
+        return crop_ids.reshape(batch_size, -1, 3)
 
-        if img.ndim != 4:
-            raise ValueError("Input img tensor must be in [B, C, H, W] format.")
-        if context.ndim != 3:
-            raise ValueError("Input txt tensors must have 3 dimensions.")
-
-        params = self.radiance_get_override_params(transformer_options.get("chroma_radiance_options", {}))
-
-        h_len = (img.shape[-2] // self.patch_size)
-        w_len = (img.shape[-1] // self.patch_size)
-
-        img_ids = torch.zeros((h_len, w_len, 3), device=x.device, dtype=x.dtype)
-        img_ids[:, :, 1] = img_ids[:, :, 1] + torch.linspace(0, h_len - 1, steps=h_len, device=x.device, dtype=x.dtype).unsqueeze(1)
-        img_ids[:, :, 2] = img_ids[:, :, 2] + torch.linspace(0, w_len - 1, steps=w_len, device=x.device, dtype=x.dtype).unsqueeze(0)
-        img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs)
-        txt_ids = torch.zeros((bs, context.shape[1], 3), device=x.device, dtype=x.dtype)
-
+    def _prediction_pass(self, img: Tensor, img_ids: Tensor, context: Tensor, txt_ids: Tensor, timestep: Tensor, guidance: Optional[Tensor], control: Optional[dict], transformer_options: dict, params: ChromaRadianceParams, **kwargs: dict) -> Tensor:
+        h_orig, w_orig = img.shape[-2], img.shape[-1]
+        padded_img = comfy.ldm.common_dit.pad_to_patch_size(img, (self.patch_size, self.patch_size))
         img_out = self.forward_orig(
-            img,
+            padded_img,
             img_ids,
             context,
             txt_ids,
@@ -326,4 +253,72 @@ class ChromaRadiance(Chroma):
             transformer_options,
             attn_mask=kwargs.get("attention_mask", None),
         )
-        return self.forward_nerf(img, img_out, params)[:, :, :h, :w]
+        denoised_img = self.forward_nerf(padded_img, img_out, params)
+        return denoised_img[:, :, :h_orig, :w_orig]
+
+    def _forward(self, x: Tensor, timestep: Tensor, context: Tensor, guidance: Optional[Tensor], control: Optional[dict]=None, transformer_options: dict={}, **kwargs: dict) -> Tensor:
+        radiance_opts = transformer_options.get("chroma_radiance_options", {})
+        params = self.radiance_get_override_params(radiance_opts)
+
+        bs, c, h, w = x.shape
+        h_len, w_len = h // self.patch_size, w // self.patch_size
+        img_ids_full = torch.zeros((h_len, w_len, 3), device=x.device, dtype=x.dtype)
+        img_ids_full[:, :, 1] += torch.linspace(0, h_len - 1, steps=h_len, device=x.device, dtype=x.dtype).unsqueeze(1)
+        img_ids_full[:, :, 2] += torch.linspace(0, w_len - 1, steps=w_len, device=x.device, dtype=x.dtype).unsqueeze(0)
+        img_ids_full = repeat(img_ids_full, "h w c -> b (h w) c", b=bs)
+        txt_ids = torch.zeros((bs, context.shape[1], 3), device=x.device, dtype=x.dtype)
+
+        current_sigma = timestep[0].item()
+        is_mitigation_active = params.grid_mitigation_enabled and (current_sigma < params.mitigation_start_sigma)
+
+        if not is_mitigation_active:
+            return self._prediction_pass(x, img_ids_full, context, txt_ids, timestep, guidance, control, transformer_options, params, **kwargs)
+        else:
+            pred_full = self._prediction_pass(x, img_ids_full, context, txt_ids, timestep, guidance, control, transformer_options, params, **kwargs)
+
+            crop_h = h - self.patch_size
+            crop_w = w - self.patch_size
+            crop_h = (crop_h // self.patch_size) * self.patch_size
+            crop_w = (crop_w // self.patch_size) * self.patch_size
+
+            # --- ROBUST AVERAGING LOGIC (NO FEATHERING) ---
+            if params.num_offsets == 1:
+                # Simple case: one offset, one paste.
+                max_offset_y = min(params.offset_size, h - crop_h)
+                max_offset_x = min(params.offset_size, w - crop_w)
+                offset_y = torch.randint(0, max_offset_y + 1, (1,)).item() if max_offset_y >= 0 else 0
+                offset_x = torch.randint(0, max_offset_x + 1, (1,)).item() if max_offset_x >= 0 else 0
+
+                x_cropped = x[:, :, offset_y:offset_y+crop_h, offset_x:offset_x+crop_w]
+                ids_cropped = self._extract_crop_position_ids(img_ids_full, offset_y, offset_x, crop_h, crop_w, self.patch_size)
+                pred_crop = self._prediction_pass(x_cropped, ids_cropped, context, txt_ids, timestep, guidance, control, transformer_options, params, **kwargs)
+
+                final_pred = pred_full.clone()
+                final_pred[:, :, offset_y:offset_y+crop_h, offset_x:offset_x+crop_w] = pred_crop
+                return final_pred
+            else:
+                # Multi-offset case: use stable weighted averaging.
+                accumulated_crops = torch.zeros_like(pred_full)
+                crop_weights = torch.zeros_like(pred_full)
+
+                for _ in range(params.num_offsets):
+                    max_offset_y = min(params.offset_size, h - crop_h)
+                    max_offset_x = min(params.offset_size, w - crop_w)
+                    offset_y = torch.randint(0, max_offset_y + 1, (1,)).item() if max_offset_y >= 0 else 0
+                    offset_x = torch.randint(0, max_offset_x + 1, (1,)).item() if max_offset_x >= 0 else 0
+
+                    x_cropped = x[:, :, offset_y:offset_y+crop_h, offset_x:offset_x+crop_w]
+                    ids_cropped = self._extract_crop_position_ids(img_ids_full, offset_y, offset_x, crop_h, crop_w, self.patch_size)
+                    pred_crop = self._prediction_pass(x_cropped, ids_cropped, context, txt_ids, timestep, guidance, control, transformer_options, params, **kwargs)
+
+                    accumulated_crops[:, :, offset_y:offset_y+crop_h, offset_x:offset_x+crop_w] += pred_crop
+                    crop_weights[:, :, offset_y:offset_y+crop_h, offset_x:offset_x+crop_w] += 1.0
+
+                crop_mask = crop_weights > 0
+                # Calculate the average only where crops happened
+                avg_blended_crops = accumulated_crops / torch.clamp(crop_weights, min=1.0)
+
+                # Where the mask is true (crops happened), use the averaged result.
+                # Where the mask is false (no crops happened), keep the original full prediction.
+                final_pred = torch.where(crop_mask, avg_blended_crops, pred_full)
+                return final_pred
