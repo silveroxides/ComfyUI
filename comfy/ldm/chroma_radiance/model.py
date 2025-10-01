@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor, nn
 from einops import repeat
 import comfy.ldm.common_dit
@@ -37,9 +36,7 @@ class ChromaRadianceParams(ChromaParams):
     nerf_tile_size: int
     nerf_final_head_type: str
     nerf_embedder_dtype: Optional[torch.dtype]
-
     grid_mitigation_enabled: bool = field(default=False)
-    mitigation_start_sigma: float = field(default=0.5)
     num_offsets: int = field(default=1)
     offset_size: int = field(default=15)
 
@@ -54,12 +51,9 @@ class ChromaRadiance(Chroma):
             raise RuntimeError("Attempt to create ChromaRadiance object without setting operations")
         nn.Module.__init__(self)
         self.dtype = dtype
-
         kwargs.setdefault('grid_mitigation_enabled', False)
-        kwargs.setdefault('mitigation_start_sigma', 0.5)
         kwargs.setdefault('num_offsets', 1)
         kwargs.setdefault('offset_size', kwargs.get('patch_size', 16) - 1)
-
         params = ChromaRadianceParams(**kwargs)
         self.params = params
         self.patch_size = params.patch_size
@@ -154,7 +148,8 @@ class ChromaRadiance(Chroma):
                 operations=operations,
             )
         else:
-            raise ValueError(f"Unsupported nerf_final_head_type {params.nerf_final_head_type}")
+            errstr = f"Unsupported nerf_final_head_type {params.nerf_final_head_type}"
+            raise ValueError(errstr)
         self.skip_mmdit = []
         self.skip_dit = []
         self.lite = False
@@ -171,11 +166,16 @@ class ChromaRadiance(Chroma):
         img = self.img_in_patch(img)
         return img.flatten(2).transpose(1, 2)
 
-    def forward_nerf(self, img_orig: Tensor, img_out: Tensor, params: ChromaRadianceParams) -> Tensor:
+    def forward_nerf(
+        self,
+        img_orig: Tensor,
+        img_out: Tensor,
+        params: ChromaRadianceParams,
+    ) -> Tensor:
         B, C, H, W = img_orig.shape
         num_patches = img_out.shape[1]
         patch_size = params.patch_size
-        nerf_pixels = F.unfold(img_orig, kernel_size=patch_size, stride=patch_size)
+        nerf_pixels = nn.functional.unfold(img_orig, kernel_size=patch_size, stride=patch_size)
         nerf_pixels = nerf_pixels.transpose(1, 2)
         if params.nerf_tile_size > 0 and num_patches > params.nerf_tile_size:
             img_dct = self.forward_tiled_nerf(img_out, nerf_pixels, B, C, num_patches, patch_size, params)
@@ -188,7 +188,7 @@ class ChromaRadiance(Chroma):
         img_dct = img_dct.transpose(1, 2)
         img_dct = img_dct.reshape(B, num_patches, -1)
         img_dct = img_dct.transpose(1, 2)
-        img_dct = F.fold(
+        img_dct = nn.functional.fold(
             img_dct,
             output_size=(H, W),
             kernel_size=patch_size,
@@ -196,7 +196,16 @@ class ChromaRadiance(Chroma):
         )
         return self._nerf_final_layer(img_dct)
 
-    def forward_tiled_nerf(self, nerf_hidden: Tensor, nerf_pixels: Tensor, batch: int, channels: int, num_patches: int, patch_size: int, params: ChromaRadianceParams) -> Tensor:
+    def forward_tiled_nerf(
+        self,
+        nerf_hidden: Tensor,
+        nerf_pixels: Tensor,
+        batch: int,
+        channels: int,
+        num_patches: int,
+        patch_size: int,
+        params: ChromaRadianceParams,
+    ) -> Tensor:
         tile_size = params.nerf_tile_size
         output_tiles = []
         for i in range(0, num_patches, tile_size):
@@ -220,10 +229,16 @@ class ChromaRadiance(Chroma):
         nullable_keys = frozenset(("nerf_embedder_dtype",))
         bad_keys = tuple(k for k in overrides if k not in params_dict)
         if bad_keys:
-            raise ValueError(f"Unknown key(s) in transformer_options chroma_radiance_options: {', '.join(bad_keys)}")
-        bad_keys = tuple(k for k, v in overrides.items() if type(v) != type(getattr(params, k)) and (v is not None or k not in nullable_keys))
+            e = f"Unknown key(s) in transformer_options chroma_radiance_options: {', '.join(bad_keys)}"
+            raise ValueError(e)
+        bad_keys = tuple(
+            k
+            for k, v in overrides.items()
+            if type(v) != type(getattr(params, k)) and (v is not None or k not in nullable_keys)
+        )
         if bad_keys:
-            raise ValueError(f"Invalid value(s) in transformer_options chroma_radiance_options: {', '.join(bad_keys)}")
+            e = f"Invalid value(s) in transformer_options chroma_radiance_options: {', '.join(bad_keys)}"
+            raise ValueError(e)
         params_dict |= overrides
         return params.__class__(**params_dict)
 
@@ -239,7 +254,19 @@ class ChromaRadiance(Chroma):
         crop_ids = spatial_ids[:, patch_offset_y:patch_offset_y + crop_patch_height, patch_offset_x:patch_offset_x + crop_patch_width, :]
         return crop_ids.reshape(batch_size, -1, 3)
 
-    def _prediction_pass(self, img: Tensor, img_ids: Tensor, context: Tensor, txt_ids: Tensor, timestep: Tensor, guidance: Optional[Tensor], control: Optional[dict], transformer_options: dict, params: ChromaRadianceParams, **kwargs: dict) -> Tensor:
+    def _prediction_pass(
+        self,
+        img: Tensor,
+        img_ids: Tensor,
+        context: Tensor,
+        txt_ids: Tensor,
+        timestep: Tensor,
+        guidance: Optional[Tensor],
+        control: Optional[dict],
+        transformer_options: dict,
+        params: ChromaRadianceParams,
+        **kwargs: dict,
+    ) -> Tensor:
         h_orig, w_orig = img.shape[-2], img.shape[-1]
         padded_img = comfy.ldm.common_dit.pad_to_patch_size(img, (self.patch_size, self.patch_size))
         img_out = self.forward_orig(
@@ -256,69 +283,68 @@ class ChromaRadiance(Chroma):
         denoised_img = self.forward_nerf(padded_img, img_out, params)
         return denoised_img[:, :, :h_orig, :w_orig]
 
-    def _forward(self, x: Tensor, timestep: Tensor, context: Tensor, guidance: Optional[Tensor], control: Optional[dict]=None, transformer_options: dict={}, **kwargs: dict) -> Tensor:
+    def _forward(
+        self,
+        x: Tensor,
+        timestep: Tensor,
+        context: Tensor,
+        guidance: Optional[Tensor],
+        control: Optional[dict]=None,
+        transformer_options: dict={},
+        **kwargs: dict,
+    ) -> Tensor:
         radiance_opts = transformer_options.get("chroma_radiance_options", {})
         params = self.radiance_get_override_params(radiance_opts)
 
         bs, c, h, w = x.shape
-        h_len, w_len = h // self.patch_size, w // self.patch_size
+        h_len = h // self.patch_size
+        w_len = w // self.patch_size
         img_ids_full = torch.zeros((h_len, w_len, 3), device=x.device, dtype=x.dtype)
         img_ids_full[:, :, 1] += torch.linspace(0, h_len - 1, steps=h_len, device=x.device, dtype=x.dtype).unsqueeze(1)
         img_ids_full[:, :, 2] += torch.linspace(0, w_len - 1, steps=w_len, device=x.device, dtype=x.dtype).unsqueeze(0)
         img_ids_full = repeat(img_ids_full, "h w c -> b (h w) c", b=bs)
         txt_ids = torch.zeros((bs, context.shape[1], 3), device=x.device, dtype=x.dtype)
 
-        current_sigma = timestep[0].item()
-        is_mitigation_active = params.grid_mitigation_enabled and (current_sigma < params.mitigation_start_sigma)
-
-        if not is_mitigation_active:
+        if not params.grid_mitigation_enabled:
             return self._prediction_pass(x, img_ids_full, context, txt_ids, timestep, guidance, control, transformer_options, params, **kwargs)
         else:
             pred_full = self._prediction_pass(x, img_ids_full, context, txt_ids, timestep, guidance, control, transformer_options, params, **kwargs)
 
-            crop_h = h - self.patch_size
-            crop_w = w - self.patch_size
-            crop_h = (crop_h // self.patch_size) * self.patch_size
-            crop_w = (crop_w // self.patch_size) * self.patch_size
+            crop_size_h = h - self.patch_size
+            crop_size_w = w - self.patch_size
+            crop_size_h = (crop_size_h // self.patch_size) * self.patch_size
+            crop_size_w = (crop_size_w // self.patch_size) * self.patch_size
 
-            # --- ROBUST AVERAGING LOGIC (NO FEATHERING) ---
             if params.num_offsets == 1:
-                # Simple case: one offset, one paste.
-                max_offset_y = min(params.offset_size, h - crop_h)
-                max_offset_x = min(params.offset_size, w - crop_w)
+                max_offset_y = min(params.offset_size, h - crop_size_h)
+                max_offset_x = min(params.offset_size, w - crop_size_w)
                 offset_y = torch.randint(0, max_offset_y + 1, (1,)).item() if max_offset_y >= 0 else 0
                 offset_x = torch.randint(0, max_offset_x + 1, (1,)).item() if max_offset_x >= 0 else 0
-
-                x_cropped = x[:, :, offset_y:offset_y+crop_h, offset_x:offset_x+crop_w]
-                ids_cropped = self._extract_crop_position_ids(img_ids_full, offset_y, offset_x, crop_h, crop_w, self.patch_size)
-                pred_crop = self._prediction_pass(x_cropped, ids_cropped, context, txt_ids, timestep, guidance, control, transformer_options, params, **kwargs)
-
+                x_cropped = x[:, :, offset_y:offset_y+crop_size_h, offset_x:offset_x+crop_size_w]
+                img_ids_cropped = self._extract_crop_position_ids(img_ids_full, offset_y, offset_x, crop_size_h, crop_size_w, self.patch_size)
+                pred_crop = self._prediction_pass(x_cropped, img_ids_cropped, context, txt_ids, timestep, guidance, control, transformer_options, params, **kwargs)
                 final_pred = pred_full.clone()
-                final_pred[:, :, offset_y:offset_y+crop_h, offset_x:offset_x+crop_w] = pred_crop
+                final_pred[:, :, offset_y:offset_y+crop_size_h, offset_x:offset_x+crop_size_w] = pred_crop
                 return final_pred
             else:
-                # Multi-offset case: use stable weighted averaging.
                 accumulated_crops = torch.zeros_like(pred_full)
                 crop_weights = torch.zeros_like(pred_full)
 
                 for _ in range(params.num_offsets):
-                    max_offset_y = min(params.offset_size, h - crop_h)
-                    max_offset_x = min(params.offset_size, w - crop_w)
+                    max_offset_y = min(params.offset_size, h - crop_size_h)
+                    max_offset_x = min(params.offset_size, w - crop_size_w)
                     offset_y = torch.randint(0, max_offset_y + 1, (1,)).item() if max_offset_y >= 0 else 0
                     offset_x = torch.randint(0, max_offset_x + 1, (1,)).item() if max_offset_x >= 0 else 0
 
-                    x_cropped = x[:, :, offset_y:offset_y+crop_h, offset_x:offset_x+crop_w]
-                    ids_cropped = self._extract_crop_position_ids(img_ids_full, offset_y, offset_x, crop_h, crop_w, self.patch_size)
-                    pred_crop = self._prediction_pass(x_cropped, ids_cropped, context, txt_ids, timestep, guidance, control, transformer_options, params, **kwargs)
+                    x_cropped = x[:, :, offset_y:offset_y+crop_size_h, offset_x:offset_x+crop_size_w]
+                    img_ids_cropped = self._extract_crop_position_ids(img_ids_full, offset_y, offset_x, crop_size_h, crop_size_w, self.patch_size)
+                    pred_crop = self._prediction_pass(x_cropped, img_ids_cropped, context, txt_ids, timestep, guidance, control, transformer_options, params, **kwargs)
 
-                    accumulated_crops[:, :, offset_y:offset_y+crop_h, offset_x:offset_x+crop_w] += pred_crop
-                    crop_weights[:, :, offset_y:offset_y+crop_h, offset_x:offset_x+crop_w] += 1.0
+                    accumulated_crops[:, :, offset_y:offset_y+crop_size_h, offset_x:offset_x+crop_size_w] += pred_crop
+                    crop_weights[:, :, offset_y:offset_y+crop_size_h, offset_x:offset_x+crop_size_w] += 1.0
 
                 crop_mask = crop_weights > 0
-                # Calculate the average only where crops happened
-                avg_blended_crops = accumulated_crops / torch.clamp(crop_weights, min=1.0)
+                blended_crops = torch.where(crop_mask, accumulated_crops / torch.clamp(crop_weights, min=1.0), pred_full)
 
-                # Where the mask is true (crops happened), use the averaged result.
-                # Where the mask is false (no crops happened), keep the original full prediction.
-                final_pred = torch.where(crop_mask, avg_blended_crops, pred_full)
+                final_pred = torch.where(crop_mask, blended_crops, pred_full)
                 return final_pred

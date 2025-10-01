@@ -67,16 +67,7 @@ class ChromaRadianceOptions(io.ComfyNode):
                     default=False,
                     tooltip="When enabled, will attempt to mitigate the grid artifacts when generating.",
                 ),
-                # === CORRECTED INPUT START ===
-                io.Float.Input(
-                    id="mitigation_start_sigma",
-                    default=0.5,
-                    min=0.0,
-                    max=1.0,
-                    step=0.01,
-                    tooltip="Grid mitigation will only activate when the noise sigma is BELOW this value. (e.g., 0.5 activates for the last half of sampling)",
-                ),
-                # === CORRECTED INPUT END ===
+                # === NEW INPUTS START ===
                 io.Int.Input(
                     id="num_offsets",
                     default=1,
@@ -91,6 +82,7 @@ class ChromaRadianceOptions(io.ComfyNode):
                     max=15,
                     tooltip="Maximum pixel shift for grid mitigation crops. Default of 15 is recommended for 16x16 patches.",
                 ),
+                # === NEW INPUTS END ===
             ],
             outputs=[io.Model.Output()],
         )
@@ -105,9 +97,10 @@ class ChromaRadianceOptions(io.ComfyNode):
         end_sigma: float,
         nerf_tile_size: int,
         grid_mitigation: bool,
-        mitigation_start_sigma: float,
+        # === NEW ARGUMENTS START ===
         num_offsets: int,
         offset_size: int,
+        # === NEW ARGUMENTS END ===
     ) -> io.NodeOutput:
         radiance_options = {}
         if nerf_tile_size >= 0:
@@ -115,9 +108,10 @@ class ChromaRadianceOptions(io.ComfyNode):
 
         if grid_mitigation:
             radiance_options["grid_mitigation_enabled"] = grid_mitigation
-            radiance_options["mitigation_start_sigma"] = mitigation_start_sigma
+            # === UPDATED LOGIC START ===
             radiance_options["num_offsets"] = num_offsets
             radiance_options["offset_size"] = offset_size
+            # === UPDATED LOGIC END ===
 
         if not radiance_options:
             return io.NodeOutput(model)
@@ -129,6 +123,7 @@ class ChromaRadianceOptions(io.ComfyNode):
             sigma = args["timestep"].max().detach().cpu().item()
             if end_sigma <= sigma <= start_sigma:
                 transformer_options = c.get("transformer_options", {}).copy()
+                # Ensure chroma_radiance_options exists before merging
                 existing_opts = transformer_options.get("chroma_radiance_options", {}).copy()
                 existing_opts.update(radiance_options)
                 transformer_options["chroma_radiance_options"] = existing_opts
