@@ -1,8 +1,11 @@
 # from https://github.com/bebebe666/OptimalSteps
 
-
 import numpy as np
 import torch
+
+from typing_extensions import override
+from comfy_api.latest import ComfyExtension, io
+
 
 def loglinear_interp(t_steps, num_steps):
     """
@@ -24,25 +27,28 @@ NOISE_LEVELS = {"FLUX": [0.9968, 0.9886, 0.9819, 0.975, 0.966, 0.9471, 0.9158, 0
 "Chroma-Flash": [0.992, 0.001],
 }
 
-class OptimalStepsScheduler:
+class OptimalStepsScheduler(io.ComfyNode):
     @classmethod
-    def INPUT_TYPES(s):
-        return {"required":
-                    {"model_type": (["FLUX", "Wan", "Chroma", "Chroma-Flash"], ),
-                     "steps": ("INT", {"default": 20, "min": 3, "max": 1000}),
-                     "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                      }
-               }
-    RETURN_TYPES = ("SIGMAS",)
-    CATEGORY = "sampling/custom_sampling/schedulers"
+    def define_schema(cls):
+        return io.Schema(
+            node_id="OptimalStepsScheduler",
+            category="sampling/custom_sampling/schedulers",
+            inputs=[
+                io.Combo.Input("model_type", options=["FLUX", "Wan", "Chroma"]),
+                io.Int.Input("steps", default=20, min=3, max=1000),
+                io.Float.Input("denoise", default=1.0, min=0.0, max=1.0, step=0.01),
+            ],
+            outputs=[
+                io.Sigmas.Output(),
+            ],
+        )
 
-    FUNCTION = "get_sigmas"
-
-    def get_sigmas(self, model_type, steps, denoise):
+    @classmethod
+    def execute(cls, model_type, steps, denoise) ->io.NodeOutput:
         total_steps = steps
         if denoise < 1.0:
             if denoise <= 0.0:
-                return (torch.FloatTensor([]),)
+                return io.NodeOutput(torch.FloatTensor([]))
             total_steps = round(steps * denoise)
 
         sigmas = NOISE_LEVELS[model_type][:]
@@ -51,8 +57,16 @@ class OptimalStepsScheduler:
 
         sigmas = sigmas[-(total_steps + 1):]
         sigmas[-1] = 0
-        return (torch.FloatTensor(sigmas), )
+        return io.NodeOutput(torch.FloatTensor(sigmas))
 
-NODE_CLASS_MAPPINGS = {
-    "OptimalStepsScheduler": OptimalStepsScheduler,
-}
+
+class OptimalStepsExtension(ComfyExtension):
+    @override
+    async def get_node_list(self) -> list[type[io.ComfyNode]]:
+        return [
+            OptimalStepsScheduler,
+        ]
+
+
+async def comfy_entrypoint() -> OptimalStepsExtension:
+    return OptimalStepsExtension()
