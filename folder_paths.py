@@ -23,6 +23,7 @@ if args.models_directory:
     models_dir = os.path.abspath(args.models_directory)
 else:
     models_dir = os.path.join(base_path, "models")
+
 folder_names_and_paths["checkpoints"] = ([os.path.join(models_dir, "checkpoints")], supported_pt_extensions)
 folder_names_and_paths["configs"] = ([os.path.join(models_dir, "configs")], [".yaml"])
 
