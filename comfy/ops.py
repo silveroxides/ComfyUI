@@ -58,7 +58,7 @@ except (ModuleNotFoundError, TypeError):
 NVIDIA_MEMORY_CONV_BUG_WORKAROUND = False
 try:
     if comfy.model_management.is_nvidia():
-        if torch.backends.cudnn.version() >= 91200 and comfy.model_management.torch_version_numeric >= (2, 9) and comfy.model_management.torch_version_numeric <= (2, 10):
+        if torch.backends.cudnn.version() >= 91002 and comfy.model_management.torch_version_numeric >= (2, 9) and comfy.model_management.torch_version_numeric <= (2, 10):
             #TODO: change upper bound version once it's fixed'
             NVIDIA_MEMORY_CONV_BUG_WORKAROUND = True
             logging.info("working around nvidia conv3d memory bug.")
@@ -66,9 +66,6 @@ except:
     pass
 
 cast_to = comfy.model_management.cast_to #TODO: remove once no more references
-
-if torch.cuda.is_available() and torch.backends.cudnn.is_available() and PerformanceFeature.AutoTune in args.fast:
-    torch.backends.cudnn.benchmark = True
 
 def cast_to_input(weight, input, non_blocking=False, copy=True):
     return comfy.model_management.cast_to(weight, input.dtype, input.device, non_blocking=non_blocking, copy=copy)

@@ -176,12 +176,18 @@ class ChromaRadiance(Chroma):
         num_patches = img_out.shape[1]
         patch_size = params.patch_size
         nerf_pixels = nn.functional.unfold(img_orig, kernel_size=patch_size, stride=patch_size)
-        nerf_pixels = nerf_pixels.transpose(1, 2)
+        nerf_pixels = nerf_pixels.transpose(1, 2) # -> [B, NumPatches, C * P * P]
+
+        # Reshape for per-patch processing
+        nerf_hidden = img_out.reshape(B * num_patches, params.hidden_size)
+        nerf_pixels = nerf_pixels.reshape(B * num_patches, C, patch_size**2).transpose(1, 2)
+
         if params.nerf_tile_size > 0 and num_patches > params.nerf_tile_size:
-            img_dct = self.forward_tiled_nerf(img_out, nerf_pixels, B, C, num_patches, patch_size, params)
+            # Enable tiling if nerf_tile_size isn't 0 and we actually have more patches than
+            # the tile size.
+            img_dct = self.forward_tiled_nerf(nerf_hidden, nerf_pixels, B, C, num_patches, patch_size, params)
         else:
-            nerf_hidden = img_out.reshape(B * num_patches, params.hidden_size)
-            nerf_pixels = nerf_pixels.reshape(B * num_patches, C, patch_size**2).transpose(1, 2)
+            # Get DCT-encoded pixel embeddings [pixel-dct]
             img_dct = self.nerf_image_embedder(nerf_pixels)
             for block in self.nerf_blocks:
                 img_dct = block(img_dct, nerf_hidden)
@@ -210,11 +216,12 @@ class ChromaRadiance(Chroma):
         output_tiles = []
         for i in range(0, num_patches, tile_size):
             end = min(i + tile_size, num_patches)
-            nerf_hidden_tile = nerf_hidden[:, i:end, :]
-            nerf_pixels_tile = nerf_pixels[:, i:end, :]
-            num_patches_tile = nerf_hidden_tile.shape[1]
-            nerf_hidden_tile = nerf_hidden_tile.reshape(batch * num_patches_tile, params.hidden_size)
-            nerf_pixels_tile = nerf_pixels_tile.reshape(batch * num_patches_tile, channels, patch_size**2).transpose(1, 2)
+
+            # Slice the current tile from the input tensors
+            nerf_hidden_tile = nerf_hidden[i * batch:end * batch]
+            nerf_pixels_tile = nerf_pixels[i * batch:end * batch]
+
+            # get DCT-encoded pixel embeddings [pixel-dct]
             img_dct_tile = self.nerf_image_embedder(nerf_pixels_tile)
             for block in self.nerf_blocks:
                 img_dct_tile = block(img_dct_tile, nerf_hidden_tile)
