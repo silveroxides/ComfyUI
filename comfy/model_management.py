@@ -89,6 +89,7 @@ if args.deterministic:
 
 directml_enabled = False
 if args.directml is not None:
+    logging.warning("WARNING: torch-directml barely works, is very slow, has not been updated in over 1 year and might be removed soon, please don't use it, there are better options.")
     import torch_directml
     directml_enabled = True
     device_index = args.directml
@@ -998,12 +999,6 @@ def device_supports_non_blocking(device):
         return False
     return True
 
-def device_should_use_non_blocking(device):
-    if not device_supports_non_blocking(device):
-        return False
-    return False
-    # return True #TODO: figure out why this causes memory issues on Nvidia and possibly others
-
 def force_channels_last():
     if args.force_channels_last:
         return True
@@ -1084,6 +1079,36 @@ def cast_to(weight, dtype=None, device=None, non_blocking=False, copy=False, str
 def cast_to_device(tensor, device, dtype, copy=False):
     non_blocking = device_supports_non_blocking(device)
     return cast_to(tensor, dtype=dtype, device=device, non_blocking=non_blocking, copy=copy)
+
+def pin_memory(tensor):
+    if PerformanceFeature.PinnedMem not in args.fast:
+        return False
+
+    if not is_nvidia():
+        return False
+
+    if not is_device_cpu(tensor.device):
+        return False
+
+    if torch.cuda.cudart().cudaHostRegister(tensor.data_ptr(), tensor.numel() * tensor.element_size(), 1) == 0:
+        return True
+
+    return False
+
+def unpin_memory(tensor):
+    if PerformanceFeature.PinnedMem not in args.fast:
+        return False
+
+    if not is_nvidia():
+        return False
+
+    if not is_device_cpu(tensor.device):
+        return False
+
+    if torch.cuda.cudart().cudaHostUnregister(tensor.data_ptr()) == 0:
+        return True
+
+    return False
 
 def sage_attention_enabled():
     return args.use_sage_attention
