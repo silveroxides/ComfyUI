@@ -1,6 +1,7 @@
 import base64
 import logging
 import math
+import mimetypes
 import uuid
 from io import BytesIO
 from typing import Optional
@@ -12,7 +13,7 @@ from PIL import Image
 
 from comfy.utils import common_upscale
 from comfy_api.latest import Input, InputImpl
-from comfy_api.util import VideoContainer, VideoCodec
+from comfy_api.util import VideoCodec, VideoContainer
 
 from ._helpers import mimetype_to_extension
 
@@ -430,3 +431,40 @@ def audio_bytes_to_audio_input(audio_bytes: bytes) -> dict:
     wav = torch.cat(frames, dim=1)  # [C, T]
     wav = _f32_pcm(wav)
     return {"waveform": wav.unsqueeze(0).contiguous(), "sample_rate": out_sr}
+
+
+def resize_mask_to_image(
+    mask: torch.Tensor,
+    image: torch.Tensor,
+    upscale_method="nearest-exact",
+    crop="disabled",
+    allow_gradient=True,
+    add_channel_dim=False,
+):
+    """Resize mask to be the same dimensions as an image, while maintaining proper format for API calls."""
+    _, height, width, _ = image.shape
+    mask = mask.unsqueeze(-1)
+    mask = mask.movedim(-1, 1)
+    mask = common_upscale(mask, width=width, height=height, upscale_method=upscale_method, crop=crop)
+    mask = mask.movedim(1, -1)
+    if not add_channel_dim:
+        mask = mask.squeeze(-1)
+    if not allow_gradient:
+        mask = (mask > 0.5).float()
+    return mask
+
+
+def text_filepath_to_base64_string(filepath: str) -> str:
+    """Converts a text file to a base64 string."""
+    with open(filepath, "rb") as f:
+        file_content = f.read()
+    return base64.b64encode(file_content).decode("utf-8")
+
+
+def text_filepath_to_data_uri(filepath: str) -> str:
+    """Converts a text file to a data URI."""
+    base64_string = text_filepath_to_base64_string(filepath)
+    mime_type, _ = mimetypes.guess_type(filepath)
+    if mime_type is None:
+        mime_type = "application/octet-stream"
+    return f"data:{mime_type};base64,{base64_string}"
