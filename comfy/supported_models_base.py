@@ -108,7 +108,7 @@ class BASE:
         return utils.state_dict_prefix_replace(state_dict, replace_prefix)
 
     def process_unet_state_dict_for_saving(self, state_dict):
-        replace_prefix = {"": "model.diffusion_model."}
+        replace_prefix = {"model.diffusion_model.": ""}
         return utils.state_dict_prefix_replace(state_dict, replace_prefix)
 
     def process_vae_state_dict_for_saving(self, state_dict):

@@ -624,7 +624,7 @@ class CLIPSetLastLayer:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "clip": ("CLIP", ),
-                              "stop_at_clip_layer": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
+                              "stop_at_clip_layer": ("INT", {"default": -1, "min": -24, "max": 0, "step": 1}),
                               }}
     RETURN_TYPES = ("CLIP",)
     FUNCTION = "set_last_layer"
@@ -929,7 +929,7 @@ class CLIPLoader:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "clip_name": (folder_paths.get_filename_list("text_encoders"), ),
-                              "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv", "pixart", "cosmos", "lumina2", "wan", "hidream", "chroma", "ace", "omnigen2", "qwen_image", "hunyuan_image"], ),
+                              "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv", "pixart", "cosmos", "lumina2", "wan", "hidream", "chroma", "ace", "omnigen2", "qwen_image", "hunyuan_image", "chromacustom", "chromaunchained"], ),
                               },
                 "optional": {
                               "device": (["default", "cpu"], {"advanced": True}),
@@ -957,7 +957,7 @@ class DualCLIPLoader:
     def INPUT_TYPES(s):
         return {"required": { "clip_name1": (folder_paths.get_filename_list("text_encoders"), ),
                               "clip_name2": (folder_paths.get_filename_list("text_encoders"), ),
-                              "type": (["sdxl", "sd3", "flux", "hunyuan_video", "hidream", "hunyuan_image"], ),
+                              "type": (["sdxl", "sd3", "flux", "hunyuan_video", "hidream", "hunyuan_image", "chromacustom", "chromaduo", "clipltot5xxl"], ),
                               },
                 "optional": {
                               "device": (["default", "cpu"], {"advanced": True}),
@@ -1570,7 +1570,7 @@ class SaveImage:
         return {
             "required": {
                 "images": ("IMAGE", {"tooltip": "The images to save."}),
-                "filename_prefix": ("STRING", {"default": "ComfyUI", "tooltip": "The prefix for the file to save. This may include formatting information such as %date:yyyy-MM-dd% or %Empty Latent Image.width% to include values from nodes."})
+                "filename_prefix": ("STRING", {"default": "%date:yyyy-MM-dd%/ComfyUI", "tooltip": "The prefix for the file to save. This may include formatting information such as %date:yyyy-MM-dd% or %Empty Latent Image.width% to include values from nodes."})
             },
             "hidden": {
                 "prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"
@@ -2326,6 +2326,8 @@ async def init_builtin_extra_nodes():
         "nodes_tcfg.py",
         "nodes_context_windows.py",
         "nodes_qwen.py",
+        "nodes_logic.py",
+        "nodes_math.py",
         "nodes_chroma_radiance.py",
         "nodes_model_patch.py",
         "nodes_easycache.py",
