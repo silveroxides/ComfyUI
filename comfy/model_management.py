@@ -1082,32 +1082,69 @@ def cast_to_device(tensor, device, dtype, copy=False):
     non_blocking = device_supports_non_blocking(device)
     return cast_to(tensor, dtype=dtype, device=device, non_blocking=non_blocking, copy=copy)
 
-def pin_memory(tensor):
-    if PerformanceFeature.PinnedMem not in args.fast:
-        return False
 
-    if not is_nvidia():
+PINNED_MEMORY = {}
+TOTAL_PINNED_MEMORY = 0
+MAX_PINNED_MEMORY = -1
+if not args.disable_pinned_memory:
+    if is_nvidia() or is_amd():
+        if WINDOWS:
+            MAX_PINNED_MEMORY = get_total_memory(torch.device("cpu")) * 0.45  # Windows limit is apparently 50%
+        else:
+            MAX_PINNED_MEMORY = get_total_memory(torch.device("cpu")) * 0.95
+        logging.info("Enabled pinned memory {}".format(MAX_PINNED_MEMORY // (1024 * 1024)))
+
+
+def pin_memory(tensor):
+    global TOTAL_PINNED_MEMORY
+    if MAX_PINNED_MEMORY <= 0:
         return False
 
     if not is_device_cpu(tensor.device):
         return False
 
-    if torch.cuda.cudart().cudaHostRegister(tensor.data_ptr(), tensor.numel() * tensor.element_size(), 1) == 0:
+    if tensor.is_pinned():
+        #NOTE: Cuda does detect when a tensor is already pinned and would
+        #error below, but there are proven cases where this also queues an error
+        #on the GPU async. So dont trust the CUDA API and guard here
+        return False
+
+    size = tensor.numel() * tensor.element_size()
+    if (TOTAL_PINNED_MEMORY + size) > MAX_PINNED_MEMORY:
+        return False
+
+    ptr = tensor.data_ptr()
+    if torch.cuda.cudart().cudaHostRegister(ptr, size, 1) == 0:
+        PINNED_MEMORY[ptr] = size
+        TOTAL_PINNED_MEMORY += size
         return True
 
     return False
 
 def unpin_memory(tensor):
-    if PerformanceFeature.PinnedMem not in args.fast:
-        return False
-
-    if not is_nvidia():
+    global TOTAL_PINNED_MEMORY
+    if MAX_PINNED_MEMORY <= 0:
         return False
 
     if not is_device_cpu(tensor.device):
         return False
 
-    if torch.cuda.cudart().cudaHostUnregister(tensor.data_ptr()) == 0:
+    ptr = tensor.data_ptr()
+    size = tensor.numel() * tensor.element_size()
+
+    size_stored = PINNED_MEMORY.get(ptr, None)
+    if size_stored is None:
+        logging.warning("Tried to unpin tensor not pinned by ComfyUI")
+        return False
+
+    if size != size_stored:
+        logging.warning("Size of pinned tensor changed")
+        return False
+
+    if torch.cuda.cudart().cudaHostUnregister(ptr) == 0:
+        TOTAL_PINNED_MEMORY -= PINNED_MEMORY.pop(ptr)
+        if len(PINNED_MEMORY) == 0:
+            TOTAL_PINNED_MEMORY = 0
         return True
 
     return False
