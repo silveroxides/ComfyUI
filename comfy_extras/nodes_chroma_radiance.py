@@ -62,27 +62,6 @@ class ChromaRadianceOptions(io.ComfyNode):
                     min=-1,
                     tooltip="Allows overriding the default NeRF tile size. -1 means use the default (32). 0 means use non-tiling mode (may require a lot of VRAM).",
                 ),
-                io.Boolean.Input(
-                    id="grid_mitigation",
-                    default=False,
-                    tooltip="When enabled, will attempt to mitigate the grid artifacts when generating.",
-                ),
-                # === NEW INPUTS START ===
-                io.Int.Input(
-                    id="num_offsets",
-                    default=1,
-                    min=1,
-                    max=16,
-                    tooltip="Number of random crops to blend for grid mitigation. Higher values give better quality but are slower.",
-                ),
-                io.Int.Input(
-                    id="offset_size",
-                    default=15,
-                    min=1,
-                    max=15,
-                    tooltip="Maximum pixel shift for grid mitigation crops. Default of 15 is recommended for 16x16 patches.",
-                ),
-                # === NEW INPUTS END ===
             ],
             outputs=[io.Model.Output()],
         )
@@ -96,22 +75,10 @@ class ChromaRadianceOptions(io.ComfyNode):
         start_sigma: float,
         end_sigma: float,
         nerf_tile_size: int,
-        grid_mitigation: bool,
-        # === NEW ARGUMENTS START ===
-        num_offsets: int,
-        offset_size: int,
-        # === NEW ARGUMENTS END ===
     ) -> io.NodeOutput:
         radiance_options = {}
         if nerf_tile_size >= 0:
             radiance_options["nerf_tile_size"] = nerf_tile_size
-
-        if grid_mitigation:
-            radiance_options["grid_mitigation_enabled"] = grid_mitigation
-            # === UPDATED LOGIC START ===
-            radiance_options["num_offsets"] = num_offsets
-            radiance_options["offset_size"] = offset_size
-            # === UPDATED LOGIC END ===
 
         if not radiance_options:
             return io.NodeOutput(model)
@@ -123,10 +90,7 @@ class ChromaRadianceOptions(io.ComfyNode):
             sigma = args["timestep"].max().detach().cpu().item()
             if end_sigma <= sigma <= start_sigma:
                 transformer_options = c.get("transformer_options", {}).copy()
-                # Ensure chroma_radiance_options exists before merging
-                existing_opts = transformer_options.get("chroma_radiance_options", {}).copy()
-                existing_opts.update(radiance_options)
-                transformer_options["chroma_radiance_options"] = existing_opts
+                transformer_options["chroma_radiance_options"] = radiance_options.copy()
                 c["transformer_options"] = transformer_options
             if not (preserve_wrapper and old_wrapper):
                 return apply_model(args["input"], args["timestep"], **c)
