@@ -24,3 +24,6 @@ web_custom_versions/
 openapi.yaml
 filtered-openapi.yaml
 uv.lock
+
+comfyui-start.bat
+comfyui.bat
