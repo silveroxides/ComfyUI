@@ -56,6 +56,7 @@ import comfy.text_encoders.chromaduo
 import comfy.text_encoders.clipltot5xxl
 import comfy.text_encoders.chromaunchained
 import comfy.text_encoders.hunyuan_image
+import comfy.text_encoders.z_image
 
 import comfy.model_patcher
 import comfy.lora
@@ -1020,6 +1021,8 @@ class TEModel(Enum):
     GEMMA_3_4B = 13
     MISTRAL3_24B = 14
     MISTRAL3_24B_PRUNED_FLUX2 = 15
+    QWEN3_4B = 16
+
 
 def detect_te_model(sd):
     if "text_model.encoder.layers.30.mlp.fc1.weight" in sd:
@@ -1052,6 +1055,8 @@ def detect_te_model(sd):
         if weight.shape[0] == 512:
             return TEModel.QWEN25_7B
     if "model.layers.0.post_attention_layernorm.weight" in sd:
+        if 'model.layers.0.self_attn.q_norm.weight' in sd:
+            return TEModel.QWEN3_4B
         weight = sd['model.layers.0.post_attention_layernorm.weight']
         if weight.shape[0] == 5120:
             if "model.layers.39.post_attention_layernorm.weight" in sd:
@@ -1183,6 +1188,9 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
             clip_target.clip = comfy.text_encoders.flux.flux2_te(**llama_detect(clip_data), pruned=te_model == TEModel.MISTRAL3_24B_PRUNED_FLUX2)
             clip_target.tokenizer = comfy.text_encoders.flux.Flux2Tokenizer
             tokenizer_data["tekken_model"] = clip_data[0].get("tekken_model", None)
+        elif te_model == TEModel.QWEN3_4B:
+            clip_target.clip = comfy.text_encoders.z_image.te(**llama_detect(clip_data))
+            clip_target.tokenizer = comfy.text_encoders.z_image.ZImageTokenizer
         else:
             # clip_l
             if clip_type == CLIPType.CHROMACUSTOM:
