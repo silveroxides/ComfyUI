@@ -1,7 +1,7 @@
 import torch
 from einops import rearrange
 from torch import Tensor
-
+from functools import lru_cache
 from comfy.ldm.modules.attention import optimized_attention
 import comfy.model_management
 
@@ -13,7 +13,7 @@ def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor, mask=None, transforme
     x = optimized_attention(q, k, v, heads, skip_reshape=True, mask=mask, transformer_options=transformer_options)
     return x
 
-
+@lru_cache(maxsize=16)
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
     assert dim % 2 == 0
     if comfy.model_management.is_device_mps(pos.device) or comfy.model_management.is_intel_xpu() or comfy.model_management.is_directml_enabled():
