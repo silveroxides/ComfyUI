@@ -984,8 +984,8 @@ class FP4Layout(QuantizedLayout):
         )
 
 
-# Note: block_size is not hardcoded here - it's read from per-tensor .comfy_quant metadata
-# during model loading. Each tensor stores its own block_size in the JSON metadata.
+# Note: group_size here is a fallback if per-tensor .comfy_quant metadata doesn't specify it.
+# Prefer always storing group_size in per-tensor metadata during conversion.
 QUANT_ALGOS = {
     "float8_e4m3fn": {
         "storage_t": torch.float8_e4m3fn,
@@ -996,23 +996,27 @@ QUANT_ALGOS = {
         "storage_t": torch.int8,
         "parameters": {"weight_scale", "input_scale"},
         "comfy_tensor_layout": "BlockWiseINT8Layout",
+        "group_size": 128,  # Fallback if per-tensor metadata missing
         "asymmetric_layout": True,
     },
     "int8_lodewise": {
         "storage_t": torch.int8,
         "parameters": {"weight_scale", "input_scale"},
         "comfy_tensor_layout": "BlockWiseINT8LayoutLodeWise",
+        "group_size": 128,  # Fallback if per-tensor metadata missing
         "asymmetric_layout": True,
     },
     "bnb_nf4": {
         "storage_t": torch.uint8,
         "parameters": {"absmax"},
         "comfy_tensor_layout": "NF4Layout",
+        "group_size": 64,  # Fallback if per-tensor metadata missing
     },
     "bnb_fp4": {
         "storage_t": torch.uint8,
         "parameters": {"absmax"},
         "comfy_tensor_layout": "FP4Layout",
+        "group_size": 64,  # Fallback if per-tensor metadata missing
     },
 }
 
