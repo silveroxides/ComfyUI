@@ -24,6 +24,24 @@ except ImportError:
     _HAS_TRITON_INT8 = False
     logging.warning("Triton INT8 kernels not available, using PyTorch fallback")
 
+# Try to import NF4/FP4 kernels
+try:
+    from .nf4_kernels import (
+        quantize_4bit,
+        dequantize_4bit,
+        quantize_nf4,
+        dequantize_nf4,
+        quantize_fp4,
+        dequantize_fp4,
+        QuantState4bit,
+        NF4_CODEBOOK,
+        FP4_CODEBOOK_NORMALIZED,
+    )
+    _HAS_NF4_KERNELS = True
+except ImportError:
+    _HAS_NF4_KERNELS = False
+    logging.warning("NF4/FP4 kernels not available")
+
 
 def register_layout_op(torch_op, layout_type):
     """
@@ -855,6 +873,117 @@ class BlockWiseINT8LayoutLodeWise(QuantizedLayout):
         )
 
 
+# ==============================================================================
+# NF4 Layout (4-bit Normal Float)
+# ==============================================================================
+class NF4Layout(QuantizedLayout):
+    """
+    NF4 (Normal Float 4-bit) quantization layout.
+    Uses a 16-value codebook derived from the normal distribution.
+    Reference: QLoRA paper (https://arxiv.org/abs/2305.14314)
+    """
+    
+    @classmethod
+    def quantize(cls, tensor, block_size=64, compress_statistics=False, **kwargs):
+        """Quantize tensor to NF4 format."""
+        if not _HAS_NF4_KERNELS:
+            raise RuntimeError("NF4 kernels not available")
+        
+        orig_dtype = tensor.dtype
+        original_shape = tensor.shape
+        packed, quant_state = quantize_nf4(tensor, block_size, compress_statistics)
+        
+        layout_params = {
+            'absmax': quant_state.absmax,
+            'block_size': block_size,
+            'orig_dtype': orig_dtype,
+            'shape': original_shape,
+            'quant_type': 'nf4',
+            'code': quant_state.code,
+        }
+        return packed, layout_params
+    
+    @staticmethod
+    def dequantize(qdata, absmax, block_size, orig_dtype, shape, code=None, **kwargs):
+        """Dequantize NF4 packed data back to float."""
+        if not _HAS_NF4_KERNELS:
+            raise RuntimeError("NF4 kernels not available")
+        
+        if code is None:
+            code = NF4_CODEBOOK.to(qdata.device)
+        
+        quant_state = QuantState4bit(
+            absmax=absmax, shape=shape, code=code,
+            blocksize=block_size, quant_type='nf4', dtype=orig_dtype,
+        )
+        return dequantize_nf4(qdata, quant_state, orig_dtype)
+    
+    @classmethod
+    def get_plain_tensors(cls, qtensor):
+        """Extract raw tensors for computation."""
+        return (
+            qtensor._qdata,
+            qtensor._layout_params['absmax'],
+            qtensor._layout_params['block_size'],
+            qtensor._layout_params['shape'],
+        )
+
+
+# ==============================================================================
+# FP4 Layout (4-bit Floating Point)
+# ==============================================================================
+class FP4Layout(QuantizedLayout):
+    """
+    FP4 (Floating Point 4-bit) quantization layout.
+    Uses a 16-value codebook for hardware-inspired 4-bit float.
+    """
+    
+    @classmethod
+    def quantize(cls, tensor, block_size=64, compress_statistics=False, **kwargs):
+        """Quantize tensor to FP4 format."""
+        if not _HAS_NF4_KERNELS:
+            raise RuntimeError("FP4 kernels not available")
+        
+        orig_dtype = tensor.dtype
+        original_shape = tensor.shape
+        packed, quant_state = quantize_fp4(tensor, block_size, compress_statistics)
+        
+        layout_params = {
+            'absmax': quant_state.absmax,
+            'block_size': block_size,
+            'orig_dtype': orig_dtype,
+            'shape': original_shape,
+            'quant_type': 'fp4',
+            'code': quant_state.code,
+        }
+        return packed, layout_params
+    
+    @staticmethod
+    def dequantize(qdata, absmax, block_size, orig_dtype, shape, code=None, **kwargs):
+        """Dequantize FP4 packed data back to float."""
+        if not _HAS_NF4_KERNELS:
+            raise RuntimeError("FP4 kernels not available")
+        
+        if code is None:
+            code = FP4_CODEBOOK_NORMALIZED.to(qdata.device)
+        
+        quant_state = QuantState4bit(
+            absmax=absmax, shape=shape, code=code,
+            blocksize=block_size, quant_type='fp4', dtype=orig_dtype,
+        )
+        return dequantize_fp4(qdata, quant_state, orig_dtype)
+    
+    @classmethod
+    def get_plain_tensors(cls, qtensor):
+        """Extract raw tensors for computation."""
+        return (
+            qtensor._qdata,
+            qtensor._layout_params['absmax'],
+            qtensor._layout_params['block_size'],
+            qtensor._layout_params['shape'],
+        )
+
+
 QUANT_ALGOS = {
     "float8_e4m3fn": {
         "storage_t": torch.float8_e4m3fn,
@@ -875,12 +1004,26 @@ QUANT_ALGOS = {
         "group_size": 128,  # Default block size
         "asymmetric_layout": True,
     },
+    "bnb_nf4": {
+        "storage_t": torch.uint8,
+        "parameters": {"absmax"},
+        "comfy_tensor_layout": "NF4Layout",
+        "group_size": 64,  # Default block size
+    },
+    "bnb_fp4": {
+        "storage_t": torch.uint8,
+        "parameters": {"absmax"},
+        "comfy_tensor_layout": "FP4Layout",
+        "group_size": 64,  # Default block size
+    },
 }
 
 LAYOUTS = {
     "TensorCoreFP8Layout": TensorCoreFP8Layout,
     "BlockWiseINT8Layout": BlockWiseINT8Layout,
     "BlockWiseINT8LayoutLodeWise": BlockWiseINT8LayoutLodeWise,
+    "NF4Layout": NF4Layout,
+    "FP4Layout": FP4Layout,
 }
 
 
