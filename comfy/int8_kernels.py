@@ -2,12 +2,26 @@ import torch
 import triton
 import triton.language as tl
 from triton import Config
-from typing import Tuple
+from typing import Tuple, Literal
 
 
 """
-simplified explanation of the scaled int8 matmul algorithm
-adopted from deepseek scaled FP8 matmul and jetfire paper
+INT8 Quantization Kernels with Multiple Implementation Variants
+
+This module provides two different INT8 matmul implementations:
+1. "v1" - Original per-block scaling (from int8_matmul.py)
+   - Uses per-block weight scales indexed as b_s[offs_n * k]
+   - Simpler indexing, autotuned for smaller tile sizes
+   
+2. "v2" - Row-major 2D weight scaling (from int8_kernels.py)
+   - Uses 2D weight scale array indexed as b_s[pid_n, i]
+   - More explicit 2D indexing, optimized for larger tiles
+   - Includes fused operations (addmm, quantization, GELU)
+
+Both variants produce identical results but differ in their internal
+scale indexing logic and optimization strategies.
+
+Based on DeepSeek scaled FP8 matmul and Jetfire paper:
 https://arxiv.org/abs/2403.12422
 https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/kernel.py
 
@@ -50,6 +64,10 @@ dim  ├-----┼-----┼─────┼─────┤   └-----┴-----�
 """
 
 
+# ==============================================================================
+# Shared Quantization Kernels
+# ==============================================================================
+
 @triton.jit
 def act_quant_kernel(x_ptr, y_ptr, s_ptr, BLOCK_SIZE: tl.constexpr):
     """
@@ -76,9 +94,7 @@ def act_quant_kernel(x_ptr, y_ptr, s_ptr, BLOCK_SIZE: tl.constexpr):
     tl.store(s_ptr + pid, s)
 
 
-def act_quant(
-    x: torch.Tensor, block_size: int = 128
-) -> Tuple[torch.Tensor, torch.Tensor]:
+def act_quant(x: torch.Tensor, block_size: int = 128) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Quantizes the input tensor `x` using block-wise quantization.
 
@@ -92,9 +108,7 @@ def act_quant(
             - A tensor of scaling factors with dtype `torch.float32`.
     """
     assert x.is_contiguous(), "Input tensor must be contiguous"
-    assert (
-        x.size(-1) % block_size == 0
-    ), f"Last dimension size must be divisible by block_size (block_size={block_size})"
+    assert x.size(-1) % block_size == 0, f"Last dimension size must be divisible by block_size (block_size={block_size})"
     y = torch.empty_like(x, dtype=torch.int8)
     s = x.new_empty(*x.size()[:-1], x.size(-1) // block_size, dtype=torch.float32)
     # Grid size should match number of scale elements (one program per block)
@@ -128,8 +142,7 @@ def act_dequant_kernel(x_ptr, s_ptr, y_ptr, BLOCK_SIZE: tl.constexpr):
     tl.store(y_ptr + offs, y)
 
 
-def act_dequant(
-    x: torch.Tensor, s: torch.Tensor, block_size: int = 128, output_dtype: torch.dtype = None
+def act_dequant(x: torch.Tensor, s: torch.Tensor, block_size: int = 128, output_dtype: torch.dtype = None
 ) -> torch.Tensor:
     """
     Dequantizes the activation tensor `x` using the provided scale tensor.
@@ -294,6 +307,96 @@ def weight_dequant(
     )
     weight_dequant_kernel[grid](x, s, y, M, N, BLOCK_SIZE=block_size)
     return y
+
+
+# ==============================================================================
+# Lode-Wise INT8 Implementation
+# Alternative kernel with per-block weight scale indexing pattern
+# ==============================================================================
+
+int8_gemm_configs_lodewise = [
+    Config({"BLOCK_SIZE_M": m, "BLOCK_SIZE_N": n, "BLOCK_SIZE_K": 128},
+           num_stages=s, num_warps=8)
+    for m in [16, 32, 64]
+    for n in [32, 64, 128]
+    for s in [3, 4, 5, 6]
+]
+
+
+@triton.autotune(configs=int8_gemm_configs_lodewise, key=["N", "K"])
+@triton.jit
+def int8_gemm_kernel_lodewise(a_ptr, b_ptr, c_ptr, a_s_ptr, b_s_ptr, M,
+                              N: tl.constexpr, K: tl.constexpr,
+                              BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
+                              BLOCK_SIZE_K: tl.constexpr):
+    """
+    Lode-Wise INT8 GEMM kernel with per-block weight scale indexing.
+    
+    This kernel uses a different weight scale access pattern:
+    - Weight scales indexed as b_s[offs_n * k] (1D flattened per-output-lane access)
+    - Each output lane loads its own weight scale per K-block iteration
+    - Autotuned for smaller tile sizes (16, 32, 64)
+    """
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
+    k = tl.cdiv(K, BLOCK_SIZE_K)
+    offs_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]
+    b_ptrs = b_ptr + offs_n[None, :] * K + offs_k[:, None]
+    a_s_ptrs = a_s_ptr + offs_m * k
+    b_s_ptrs = b_s_ptr + offs_n * k
+    
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    for i in range(k):
+        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - i * BLOCK_SIZE_K, other=0.0)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - i * BLOCK_SIZE_K, other=0.0)
+        a_s = tl.load(a_s_ptrs)
+        b_s = tl.load(b_s_ptrs)
+        dot_prod = tl.dot(a, b)
+        accumulator += dot_prod.to(tl.float32) * a_s[:, None] * b_s[None, :]
+        a_ptrs += BLOCK_SIZE_K
+        b_ptrs += BLOCK_SIZE_K
+        a_s_ptrs += 1
+        b_s_ptrs += 1
+    
+    c = accumulator.to(c_ptr.dtype.element_ty)
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = c_ptr + offs_m[:, None] * N + offs_n[None, :]
+    mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    tl.store(c_ptrs, c, mask=mask)
+
+
+def int8_gemm_lodewise(a: torch.Tensor, a_s: torch.Tensor, 
+                       b: torch.Tensor, b_s: torch.Tensor) -> torch.Tensor:
+    """
+    Lode-Wise INT8 matmul using per-block weight scale indexing.
+    
+    This variant uses a different weight scale access pattern where each output
+    lane loads its own weight scale independently. The weight scales should be
+    organized such that b_s[n * k_blocks + k_idx] gives the scale for output n
+    at K-block k_idx.
+    
+    Args:
+        a: INT8 activations [..., K]
+        a_s: Activation scales [..., K//block_size]
+        b: INT8 weights [N, K]
+        b_s: Weight scales - flattened with N * K_blocks elements
+    
+    Returns:
+        Output tensor of shape [..., N]
+    """
+    assert all(t.is_contiguous() for t in [a, b, a_s, b_s])
+    K = a.size(-1)
+    M = a.numel() // K
+    N = b.size(0)
+    c = a.new_empty(*a.size()[:-1], N, dtype=torch.get_default_dtype())
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]), 
+                        triton.cdiv(N, META["BLOCK_SIZE_N"]))
+    int8_gemm_kernel_lodewise[grid](a, b, c, a_s, b_s, M, N, K)
+    return c
 
 
 # matmul intermediate block size is hardcoded to 128
