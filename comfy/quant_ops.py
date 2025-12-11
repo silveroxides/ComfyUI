@@ -984,6 +984,8 @@ class FP4Layout(QuantizedLayout):
         )
 
 
+# Note: block_size is not hardcoded here - it's read from per-tensor .comfy_quant metadata
+# during model loading. Each tensor stores its own block_size in the JSON metadata.
 QUANT_ALGOS = {
     "float8_e4m3fn": {
         "storage_t": torch.float8_e4m3fn,
@@ -994,27 +996,23 @@ QUANT_ALGOS = {
         "storage_t": torch.int8,
         "parameters": {"weight_scale", "input_scale"},
         "comfy_tensor_layout": "BlockWiseINT8Layout",
-        "group_size": 128,  # Default block size,
         "asymmetric_layout": True,
     },
     "int8_lodewise": {
         "storage_t": torch.int8,
         "parameters": {"weight_scale", "input_scale"},
         "comfy_tensor_layout": "BlockWiseINT8LayoutLodeWise",
-        "group_size": 128,  # Default block size
         "asymmetric_layout": True,
     },
     "bnb_nf4": {
         "storage_t": torch.uint8,
         "parameters": {"absmax"},
         "comfy_tensor_layout": "NF4Layout",
-        "group_size": 64,  # Default block size
     },
     "bnb_fp4": {
         "storage_t": torch.uint8,
         "parameters": {"absmax"},
         "comfy_tensor_layout": "FP4Layout",
-        "group_size": 64,  # Default block size
     },
 }
 
