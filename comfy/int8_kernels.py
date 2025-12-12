@@ -399,7 +399,6 @@ def int8_gemm_lodewise(a: torch.Tensor, a_s: torch.Tensor,
     return c
 
 
-# matmul intermediate block size is hardcoded to 128
 int8_gemm_configs = [
     Config(
         {"BLOCK_SIZE_M": block_m, "BLOCK_SIZE_N": block_n, "BLOCK_SIZE_K": 128},
@@ -576,15 +575,15 @@ def int8_gemm_addmm_kernel(
     tl.store(c_ptrs, c, mask=mask)
 
 
-def int8_gemm(a: torch.Tensor, a_s: torch.Tensor, b: torch.Tensor, b_s: torch.Tensor):
+def int8_gemm(a: torch.Tensor, a_s: torch.Tensor, b: torch.Tensor, b_s: torch.Tensor, input_block_size: int = 128):
     """
     Perform a matrix multiplication using INT8 precision.
     
     Expected tensor shapes:
     - a: [..., K] where ... can be any batch dimensions
     - b: [N, K] (weight matrix in standard format, kernel transposes internally)
-    - a_s: [..., K//block_size]
-    - b_s: [N//block_size, K//block_size]
+    - a_s: [..., K//input_block_size]
+    - b_s: [N//input_block_size, K//input_block_size]
 
     Args:
         a (torch.Tensor): The first input matrix, must be contiguous.
@@ -616,7 +615,7 @@ def int8_gemm(a: torch.Tensor, a_s: torch.Tensor, b: torch.Tensor, b_s: torch.Te
         triton.cdiv(M, META["BLOCK_SIZE_M"]),
         triton.cdiv(N, META["BLOCK_SIZE_N"]),
     )
-    int8_gemm_kernel[grid](a, b, c, a_s, b_s, M, N, K, BLOCK_SIZE_M=128, BLOCK_SIZE_N=128, BLOCK_SIZE_K=128)
+    int8_gemm_kernel[grid](a, b, c, a_s, b_s, M, N, K, BLOCK_SIZE_M=128, BLOCK_SIZE_N=128, BLOCK_SIZE_K=input_block_size)
     return c
 
 
@@ -625,7 +624,8 @@ def int8_addmm(
     a_s: torch.Tensor, 
     b: torch.Tensor, 
     b_s: torch.Tensor,
-    bias: torch.Tensor = None
+    bias: torch.Tensor = None,
+    input_block_size: int = 128
 ):
     """
     Fused INT8 matrix multiplication with bias addition (addmm).
@@ -634,8 +634,8 @@ def int8_addmm(
     Expected tensor shapes:
     - a: [..., K] where ... can be any batch dimensions
     - b: [N, K] (weight matrix in standard format, kernel transposes internally)
-    - a_s: [..., K//block_size]
-    - b_s: [N//block_size, K//block_size]
+    - a_s: [..., K//input_block_size]
+    - b_s: [N//input_block_size, K//input_block_size]
     - bias: [N] (optional)
     
     This is more efficient than separate matmul + bias add operations as it:
@@ -694,7 +694,7 @@ def int8_addmm(
         triton.cdiv(N, META["BLOCK_SIZE_N"]),
     )
     int8_gemm_addmm_kernel[grid](
-        a, b, c, bias_ptr, a_s, b_s, M, N, K, HAS_BIAS=has_bias, BLOCK_SIZE_M=128, BLOCK_SIZE_N=128, BLOCK_SIZE_K=128
+        a, b, c, bias_ptr, a_s, b_s, M, N, K, HAS_BIAS=has_bias, BLOCK_SIZE_M=128, BLOCK_SIZE_N=128, BLOCK_SIZE_K=input_block_size
     )
     return c
 
@@ -962,7 +962,8 @@ def int8_gemm_quant(
     a_s: torch.Tensor, 
     b: torch.Tensor, 
     b_s: torch.Tensor,
-    out_block_size: int = 128
+    out_block_size: int = 128,
+    input_block_size: int = 128
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Fused INT8 GEMM with output quantization.
@@ -974,10 +975,11 @@ def int8_gemm_quant(
 
     Args:
         a: INT8 activations [..., K]
-        a_s: Activation scales [..., K//block_size]
+        a_s: Activation scales [..., K//input_block_size]
         b: INT8 weights [N, K]
-        b_s: Weight scales [N//block_size, K//block_size]
+        b_s: Weight scales [N//input_block_size, K//input_block_size]
         out_block_size: Block size for output quantization (default: 128)
+        input_block_size: Block size used for input quantization (default: 128)
 
     Returns:
         Tuple of (quantized output INT8, output scales in activation format)
@@ -1008,7 +1010,7 @@ def int8_gemm_quant(
     )
     
     int8_gemm_quant_kernel[grid](
-        a, b, c, c_s, a_s, b_s, M, N, K, out_block_size, BLOCK_SIZE_M=128, BLOCK_SIZE_N=128, BLOCK_SIZE_K=128
+        a, b, c, c_s, a_s, b_s, M, N, K, out_block_size, BLOCK_SIZE_M=128, BLOCK_SIZE_N=128, BLOCK_SIZE_K=input_block_size
     )
     
     # Reshape scales to match batch dimensions: (M, n_blocks) -> (*batch_dims, n_blocks)
@@ -1024,7 +1026,8 @@ def int8_addmm_quant(
     b: torch.Tensor, 
     b_s: torch.Tensor,
     bias: torch.Tensor = None,
-    out_block_size: int = 128
+    out_block_size: int = 128,
+    input_block_size: int = 128
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Fused INT8 addmm with output quantization.
@@ -1036,11 +1039,12 @@ def int8_addmm_quant(
 
     Args:
         a: INT8 activations [..., K]
-        a_s: Activation scales [..., K//block_size]
+        a_s: Activation scales [..., K//input_block_size]
         b: INT8 weights [N, K]
-        b_s: Weight scales [N//block_size, K//block_size]
+        b_s: Weight scales [N//input_block_size, K//input_block_size]
         bias: Optional bias vector [N]
         out_block_size: Block size for output quantization (default: 128)
+        input_block_size: Block size used for input quantization (default: 128)
 
     Returns:
         Tuple of (quantized output INT8, output scales in activation format)
@@ -1081,7 +1085,7 @@ def int8_addmm_quant(
     )
     
     int8_gemm_addmm_quant_kernel[grid](
-        a, b, c, c_s, bias_ptr, a_s, b_s, M, N, K, out_block_size, HAS_BIAS=has_bias, BLOCK_SIZE_M=128, BLOCK_SIZE_N=128, BLOCK_SIZE_K=128
+        a, b, c, c_s, bias_ptr, a_s, b_s, M, N, K, out_block_size, HAS_BIAS=has_bias, BLOCK_SIZE_M=128, BLOCK_SIZE_N=128, BLOCK_SIZE_K=input_block_size
     )
     
     # Reshape scales to match batch dimensions: (M, n_blocks) -> (*batch_dims, n_blocks)
@@ -1258,8 +1262,12 @@ def int8_gelu(
     assert s_x.is_contiguous(), "Scale tensor must be contiguous"
     assert x.size(-1) % block_size == 0, \
         f"Last dimension must be divisible by block_size={block_size}"
-    assert block_size == 128, \
-        f"Only block_size=128 is currently supported in autotuner configs (got {block_size})"
+    
+    # Determine BLOCK_N - must be >= block_size and divisible by it
+    # Use the larger of 128 or block_size to ensure good performance
+    kernel_block_n = max(128, block_size)
+    if kernel_block_n % block_size != 0:
+        kernel_block_n = block_size  # Fall back to block_size if 128 doesn't divide evenly
     
     # Handle multi-dimensional tensors by reshaping to 2D
     original_shape = x.shape
@@ -1286,7 +1294,7 @@ def int8_gelu(
     int8_gelu_kernel[grid](
         y, s_y, x, s_x,
         M, N, SM, SN,
-        BLOCK_SIZE=block_size, BLOCK_M=128, BLOCK_N=128, BLOCK_SM=128
+        BLOCK_SIZE=block_size, BLOCK_M=128, BLOCK_N=kernel_block_n, BLOCK_SM=128
     )
     
     # Reshape back to original batch dimensions
