@@ -2360,6 +2360,7 @@ async def init_builtin_extra_nodes():
         "nodes_logic.py",
         "nodes_nop.py",
         "nodes_kandinsky5.py",
+        "nodes_wanmove.py",
     ]
 
     import_failed = []
