@@ -616,9 +616,15 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
 
                 if self._full_precision_mm or self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
                     return self.forward_comfy_cast_weights(input, *args, **kwargs)
-                if (getattr(self, 'layout_type', None) is not None and
+                
+                layout_type = getattr(self, 'layout_type', None)
+                # Skip dynamic activation quantization for block-wise layouts
+                # They're incompatible with per-tensor activation scales in _scaled_mm
+                skip_input_quant_layouts = {"BlockWiseFP8Layout", "Block3DFP8Layout", "BlockWiseINT8Layout", "BlockWiseINT8LayoutLodeWise"}
+                if (layout_type is not None and 
+                    layout_type not in skip_input_quant_layouts and
                     not isinstance(input, QuantizedTensor)):
-                    input = QuantizedTensor.from_float(input, self.layout_type, scale=getattr(self, 'input_scale', None), dtype=self.weight.dtype)
+                    input = QuantizedTensor.from_float(input, "TensorCoreFP8Layout", scale=getattr(self, 'input_scale', None), dtype=self.weight.dtype)
                 return self._forward(input, self.weight, self.bias)
 
             def convert_weight(self, weight, inplace=False, **kwargs):
