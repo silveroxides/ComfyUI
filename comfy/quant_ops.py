@@ -682,6 +682,121 @@ class BlockWiseFP8Layout(QuantizedLayout):
 
 
 # ==============================================================================
+# Block-3D FP8 Layout (Per-row-group, 3D scale shape)
+# ==============================================================================
+class Block3DFP8Layout(QuantizedLayout):
+    """
+    Per-row-group FP8 quantization layout with 3D scale tensor.
+    
+    Storage format:
+    - qdata: FP8 tensor (torch.float8_e4m3fn)
+    - scale: Per-row-group scaling factors, shape (M, num_blocks, 1) - as dequant scale
+    - block_size: Size of blocks along the N dimension
+    - orig_dtype: Original dtype before quantization
+    
+    This layout divides each row into groups of block_size elements,
+    with one scale per group. Scale shape is 3D: (out_features, in_features//block_size, 1).
+    """
+    
+    @classmethod
+    def quantize(cls, tensor, scale=None, block_size=64, dtype=torch.float8_e4m3fn, **kwargs):
+        """
+        Quantize a 2D tensor with per-row-group scaling.
+        
+        Args:
+            tensor: Input tensor to quantize, shape (M, N)
+            scale: Optional pre-computed per-row-group scales (as dequant scales, shape (M, num_blocks, 1))
+            block_size: Size of groups along the N dimension
+            dtype: Target FP8 dtype
+        
+        Returns:
+            Tuple of (quantized_data, layout_params)
+        """
+        orig_dtype = tensor.dtype
+        
+        if tensor.ndim != 2:
+            raise ValueError(f"Block3DFP8Layout requires 2D tensor, got shape {tensor.shape}")
+        
+        M, N = tensor.shape
+        
+        if N % block_size != 0:
+            raise ValueError(
+                f"Block3DFP8Layout requires N dimension divisible by block_size={block_size}. "
+                f"Got shape ({M}, {N})"
+            )
+        
+        fp8_max = torch.finfo(dtype).max
+        num_blocks = N // block_size
+        
+        # Reshape to per-row-group: (M, num_blocks, block_size)
+        tensor_grouped = tensor.view(M, num_blocks, block_size)
+        
+        if scale is None:
+            # Compute per-group absolute maximum
+            group_max = tensor_grouped.abs().amax(dim=2, keepdim=True)  # (M, num_blocks, 1)
+            quant_scale = fp8_max / group_max.clamp_min(1e-12)  # (M, num_blocks, 1)
+        else:
+            # scale is provided as dequant scale, convert to quant scale
+            quant_scale = 1.0 / scale
+        
+        # Apply scale per-group
+        tensor_scaled = tensor_grouped * quant_scale
+        
+        # Clamp and convert
+        tensor_scaled = torch.clamp(tensor_scaled, -fp8_max, fp8_max)
+        qdata_grouped = tensor_scaled.to(dtype)
+        
+        # Reshape back to original shape
+        qdata = qdata_grouped.view(M, N)
+        
+        # Store dequant scale (reciprocal of quant scale)
+        dequant_scale = 1.0 / quant_scale  # (M, num_blocks, 1)
+        
+        layout_params = {
+            'scale': dequant_scale.to(torch.float32),
+            'block_size': block_size,
+            'orig_dtype': orig_dtype
+        }
+        return qdata, layout_params
+    
+    @staticmethod
+    def dequantize(qdata, scale, block_size, orig_dtype, **kwargs):
+        """
+        Dequantize FP8 tensor with per-row-group scaling.
+        
+        Args:
+            qdata: Quantized FP8 tensor, shape (M, N)
+            scale: Per-row-group dequant scales, shape (M, num_blocks, 1)
+            block_size: Size of groups along the N dimension
+            orig_dtype: Target dtype for dequantization
+        
+        Returns:
+            Dequantized tensor in orig_dtype
+        """
+        M, N = qdata.shape
+        num_blocks = N // block_size
+        
+        # Reshape to groups
+        qdata_grouped = qdata.view(M, num_blocks, block_size)
+        
+        # Apply dequant scale per-group
+        # scale shape: (M, num_blocks, 1), broadcasts to (M, num_blocks, block_size)
+        dequantized = qdata_grouped.to(orig_dtype) * scale
+        
+        # Reshape back
+        dequantized = dequantized.view(M, N)
+        return dequantized
+    
+    @classmethod
+    def get_plain_tensors(cls, qtensor):
+        """Extract raw tensors for computation."""
+        return (
+            qtensor._qdata,
+            qtensor._layout_params['scale'],
+            qtensor._layout_params['block_size']
+        )
+
+# ==============================================================================
 # Block-Wise INT8 Layout + Operation Handlers
 # ==============================================================================
 class BlockWiseINT8Layout(QuantizedLayout):
@@ -1206,6 +1321,12 @@ QUANT_ALGOS = {
         "comfy_tensor_layout": "BlockWiseFP8Layout",
         "group_size": 64,  # Fallback if per-tensor metadata missing
     },
+    "float8_e4m3fn_block3d": {
+        "storage_t": torch.float8_e4m3fn,
+        "parameters": {"weight_scale", "input_scale"},
+        "comfy_tensor_layout": "Block3DFP8Layout",
+        "group_size": 64,  # Fallback if per-tensor metadata missing
+    },
     "int8_blockwise": {
         "storage_t": torch.int8,
         "parameters": {"weight_scale", "input_scale"},
@@ -1238,6 +1359,7 @@ LAYOUTS = {
     "TensorCoreFP8Layout": TensorCoreFP8Layout,
     "RowWiseFP8Layout": RowWiseFP8Layout,
     "BlockWiseFP8Layout": BlockWiseFP8Layout,
+    "Block3DFP8Layout": Block3DFP8Layout,
     "BlockWiseINT8Layout": BlockWiseINT8Layout,
     "BlockWiseINT8LayoutLodeWise": BlockWiseINT8LayoutLodeWise,
     "NF4Layout": NF4Layout,
@@ -1509,6 +1631,72 @@ def blockwise_fp8_func(func, args, kwargs):
         ar = list(args)
         ar[0] = plain_input
         return QuantizedTensor(func(*ar, **kwargs), "BlockWiseFP8Layout", input_tensor._layout_params)
+    return func(*args, **kwargs)
+
+
+# ==============================================================================
+# Block-3D FP8 Operation Handlers (Per-row-group, 3D scale)
+# ==============================================================================
+
+@register_layout_op(torch.ops.aten.linear.default, "Block3DFP8Layout")
+def block3d_fp8_linear(func, args, kwargs):
+    """Block-3D FP8 linear layer (dequant-fallback)."""
+    input_tensor = args[0]
+    weight = args[1]
+    bias = args[2] if len(args) > 2 else None
+    
+    # Dequantize weight (always needed for block-3d)
+    if isinstance(weight, QuantizedTensor):
+        weight = weight.dequantize()
+    
+    # Dequantize input if also quantized
+    if isinstance(input_tensor, QuantizedTensor):
+        input_tensor = input_tensor.dequantize()
+    
+    return torch.nn.functional.linear(input_tensor, weight, bias)
+
+
+@register_layout_op(torch.ops.aten.mm.default, "Block3DFP8Layout")
+def block3d_fp8_mm(func, args, kwargs):
+    """Block-3D FP8 matrix multiplication (dequant-fallback)."""
+    input_tensor = args[0]
+    weight = args[1]
+    
+    if isinstance(weight, QuantizedTensor):
+        weight = weight.dequantize()
+    if isinstance(input_tensor, QuantizedTensor):
+        input_tensor = input_tensor.dequantize()
+    
+    return func(input_tensor, weight)
+
+
+@register_layout_op(torch.ops.aten.addmm.default, "Block3DFP8Layout")
+def block3d_fp8_addmm(func, args, kwargs):
+    """Block-3D FP8 addmm operation (dequant-fallback)."""
+    bias = args[0]
+    input_tensor = args[1]
+    weight = args[2]
+    
+    if isinstance(bias, QuantizedTensor):
+        bias = bias.dequantize()
+    if isinstance(input_tensor, QuantizedTensor):
+        input_tensor = input_tensor.dequantize()
+    if isinstance(weight, QuantizedTensor):
+        weight = weight.dequantize()
+    
+    return func(bias, input_tensor, weight, **kwargs)
+
+
+@register_layout_op(torch.ops.aten.view.default, "Block3DFP8Layout")
+@register_layout_op(torch.ops.aten.t.default, "Block3DFP8Layout")
+def block3d_fp8_func(func, args, kwargs):
+    """Handle view/transpose for block-3D FP8 tensors."""
+    input_tensor = args[0]
+    if isinstance(input_tensor, QuantizedTensor):
+        plain_input, scale, block_size = Block3DFP8Layout.get_plain_tensors(input_tensor)
+        ar = list(args)
+        ar[0] = plain_input
+        return QuantizedTensor(func(*ar, **kwargs), "Block3DFP8Layout", input_tensor._layout_params)
     return func(*args, **kwargs)
 
 
