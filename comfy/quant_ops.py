@@ -584,10 +584,10 @@ class BlockWiseFP8Layout(QuantizedLayout):
     @classmethod
     def quantize(cls, tensor, scale=None, block_size=64, dtype=torch.float8_e4m3fn, **kwargs):
         """
-        Quantize a 2D tensor with 2D block-wise scaling.
+        Quantize a tensor with 2D block-wise scaling.
         
         Args:
-            tensor: Input tensor to quantize, shape (M, N)
+            tensor: Input tensor to quantize, shape (M, N) or (*batch, M, N)
             scale: Optional pre-computed per-block scales (as dequant scales)
             block_size: Size of quantization blocks (both dimensions)
             dtype: Target FP8 dtype
@@ -596,17 +596,42 @@ class BlockWiseFP8Layout(QuantizedLayout):
             Tuple of (quantized_data, layout_params)
         """
         orig_dtype = tensor.dtype
+        original_shape = tensor.shape
         
-        if tensor.ndim != 2:
-            raise ValueError(f"BlockWiseFP8Layout requires 2D tensor, got shape {tensor.shape}")
+        # Handle 3D+ tensors by flattening leading dims
+        if tensor.ndim > 2:
+            # Flatten leading dimensions: (*batch, M, N) -> (batch*M, N)
+            tensor = tensor.reshape(-1, original_shape[-1])
+        elif tensor.ndim < 2:
+            raise ValueError(f"BlockWiseFP8Layout.quantize requires at least 2D tensor, got shape {original_shape}")
         
         M, N = tensor.shape
         
+        # Handle dimensions not divisible by block_size by padding or using per-row
         if M % block_size != 0 or N % block_size != 0:
-            raise ValueError(
-                f"BlockWiseFP8Layout requires dimensions divisible by block_size={block_size}. "
-                f"Got shape ({M}, {N})"
-            )
+            # Fall back to simpler scaling if dimensions don't align
+            # Use per-tensor scaling as fallback
+            fp8_max = torch.finfo(dtype).max
+            if scale is None:
+                tensor_max = tensor.abs().amax()
+                quant_scale = fp8_max / tensor_max.clamp_min(1e-12)
+                dequant_scale = 1.0 / quant_scale
+            else:
+                dequant_scale = scale
+                quant_scale = 1.0 / scale
+            
+            qdata = (tensor * quant_scale).clamp(-fp8_max, fp8_max).to(dtype)
+            
+            # Restore original shape
+            if len(original_shape) > 2:
+                qdata = qdata.reshape(original_shape)
+            
+            layout_params = {
+                'scale': dequant_scale.to(torch.float32).reshape(1) if isinstance(dequant_scale, torch.Tensor) else torch.tensor([dequant_scale], dtype=torch.float32),
+                'block_size': block_size,
+                'orig_dtype': orig_dtype
+            }
+            return qdata, layout_params
         
         fp8_max = torch.finfo(dtype).max
         
@@ -630,8 +655,12 @@ class BlockWiseFP8Layout(QuantizedLayout):
         tensor_scaled = torch.clamp(tensor_scaled, -fp8_max, fp8_max)
         qdata_blocked = tensor_scaled.to(dtype)
         
-        # Reshape back to original shape
+        # Reshape back to 2D
         qdata = qdata_blocked.permute(0, 2, 1, 3).reshape(M, N)
+        
+        # Restore original shape if needed
+        if len(original_shape) > 2:
+            qdata = qdata.reshape(original_shape)
         
         # Store dequant scale (reciprocal of quant scale)
         dequant_scale = 1.0 / quant_scale  # (M//bs, N//bs)
@@ -649,7 +678,7 @@ class BlockWiseFP8Layout(QuantizedLayout):
         Dequantize FP8 tensor with 2D block-wise scaling.
         
         Args:
-            qdata: Quantized FP8 tensor, shape (M, N)
+            qdata: Quantized FP8 tensor, shape (M, N) or (*batch, M, N)
             scale: Per-block dequant scales, shape (M//block_size, N//block_size)
             block_size: Size of quantization blocks
             orig_dtype: Target dtype for dequantization
@@ -657,6 +686,12 @@ class BlockWiseFP8Layout(QuantizedLayout):
         Returns:
             Dequantized tensor in orig_dtype
         """
+        # Handle 3D+ tensors by flattening leading dims
+        original_shape = qdata.shape
+        if qdata.ndim > 2:
+            # Flatten leading dimensions: (*batch, M, N) -> (batch*M, N)
+            qdata = qdata.reshape(-1, original_shape[-1])
+        
         M, N = qdata.shape
         
         # Reshape to blocks
@@ -669,6 +704,11 @@ class BlockWiseFP8Layout(QuantizedLayout):
         
         # Reshape back
         dequantized = dequantized.permute(0, 2, 1, 3).reshape(M, N)
+        
+        # Restore original shape if needed
+        if len(original_shape) > 2:
+            dequantized = dequantized.reshape(original_shape)
+        
         return dequantized
     
     @classmethod
