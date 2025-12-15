@@ -251,7 +251,10 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
                 dit_config["image_model"] = "chroma_radiance"
                 dit_config["in_channels"] = 3
                 dit_config["out_channels"] = 3
-                dit_config["patch_size"] = 16
+                if f"{key_prefix}__32x32__" in state_dict_keys:
+                    dit_config["patch_size"] = 32
+                else:
+                    dit_config["patch_size"] = 16
                 dit_config["nerf_hidden_size"] = 64
                 dit_config["nerf_mlp_ratio"] = 4
                 dit_config["nerf_depth"] = 4
