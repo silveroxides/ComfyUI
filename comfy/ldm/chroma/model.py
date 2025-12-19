@@ -56,8 +56,8 @@ class Chroma(nn.Module):
         params = ChromaParams(**kwargs)
         self.params = params
         self.patch_size = params.patch_size
-        self.in_channels = params.in_channels
-        self.out_channels = params.out_channels
+        self.in_channels = params.in_channels * params.patch_size * params.patch_size
+        self.out_channels = params.out_channels * params.patch_size * params.patch_size
         if params.hidden_size % params.num_heads != 0:
             raise ValueError(
                 f"Hidden size {params.hidden_size} must be divisible by num_heads {params.num_heads}"
@@ -139,6 +139,34 @@ class Chroma(nn.Module):
             )
         raise ValueError("Bad block_type")
 
+    def process_img(self, x, index=0, h_offset=0, w_offset=0, transformer_options={}):
+        bs, c, h, w = x.shape
+        patch_size = self.patch_size
+        x = comfy.ldm.common_dit.pad_to_patch_size(x, (patch_size, patch_size))
+
+        img = rearrange(x, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch_size, pw=patch_size)
+        h_len = ((h + (patch_size // 2)) // patch_size)
+        w_len = ((w + (patch_size // 2)) // patch_size)
+
+        h_offset = ((h_offset + (patch_size // 2)) // patch_size)
+        w_offset = ((w_offset + (patch_size // 2)) // patch_size)
+
+        steps_h = h_len
+        steps_w = w_len
+
+        rope_options = transformer_options.get("rope_options", None)
+        if rope_options is not None:
+            h_len = (h_len - 1.0) * rope_options.get("scale_y", 1.0) + 1.0
+            w_len = (w_len - 1.0) * rope_options.get("scale_x", 1.0) + 1.0
+            index += rope_options.get("shift_t", 0.0)
+            h_offset += rope_options.get("shift_y", 0.0)
+            w_offset += rope_options.get("shift_x", 0.0)
+
+        img_ids = torch.zeros((steps_h, steps_w, len(self.params.axes_dim)), device=x.device, dtype=torch.float32)
+        img_ids[:, :, 0] = img_ids[:, :, 1] + index
+        img_ids[:, :, 1] = img_ids[:, :, 1] + torch.linspace(h_offset, h_len - 1 + h_offset, steps=steps_h, device=x.device, dtype=torch.float32).unsqueeze(1)
+        img_ids[:, :, 2] = img_ids[:, :, 2] + torch.linspace(w_offset, w_len - 1 + w_offset, steps=steps_w, device=x.device, dtype=torch.float32).unsqueeze(0)
+        return img, repeat(img_ids, "h w c -> b (h w) c", b=bs)
 
     def forward_orig(
         self,
@@ -274,20 +302,15 @@ class Chroma(nn.Module):
 
     def _forward(self, x, timestep, context, guidance, control=None, transformer_options={}, **kwargs):
         bs, c, h, w = x.shape
-        x = comfy.ldm.common_dit.pad_to_patch_size(x, (self.patch_size, self.patch_size))
+        patch_size = self.patch_size
 
-        img = rearrange(x, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=self.patch_size, pw=self.patch_size)
+        h_len = ((h + (patch_size // 2)) // patch_size)
+        w_len = ((w + (patch_size // 2)) // patch_size)
+        img, img_ids = self.process_img(x, transformer_options=transformer_options)
 
         if img.ndim != 3 or context.ndim != 3:
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
 
-        h_len = ((h + (self.patch_size // 2)) // self.patch_size)
-        w_len = ((w + (self.patch_size // 2)) // self.patch_size)
-        img_ids = torch.zeros((h_len, w_len, 3), device=x.device, dtype=x.dtype)
-        img_ids[:, :, 1] = img_ids[:, :, 1] + torch.linspace(0, h_len - 1, steps=h_len, device=x.device, dtype=x.dtype).unsqueeze(1)
-        img_ids[:, :, 2] = img_ids[:, :, 2] + torch.linspace(0, w_len - 1, steps=w_len, device=x.device, dtype=x.dtype).unsqueeze(0)
-        img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs)
-
         txt_ids = torch.zeros((bs, context.shape[1], 3), device=x.device, dtype=x.dtype)
         out = self.forward_orig(img, img_ids, context, txt_ids, timestep, guidance, control, transformer_options, attn_mask=kwargs.get("attention_mask", None))
-        return rearrange(out, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=h_len, w=w_len, ph=self.patch_size, pw=self.patch_size)[:,:,:h,:w]
+        return rearrange(out, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=h_len, w=w_len, ph=patch_size, pw=patch_size)[:,:,:h,:w]
