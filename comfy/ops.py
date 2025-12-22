@@ -544,12 +544,6 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     layer_conf = json.loads(layer_conf.numpy().tobytes())
 
                 if layer_conf is None:
-<<<<<<< HEAD
-                    layer_conf = MixedPrecisionOps._layer_quant_config.get(layer_name)
-
-                if layer_conf is None:
-                    self.weight = torch.nn.Parameter(weight.to(device=device, dtype=MixedPrecisionOps._compute_dtype), requires_grad=False)
-=======
                     dtype = self.factory_kwargs["dtype"]
                     self.weight = torch.nn.Parameter(weight.to(device=device, dtype=dtype), requires_grad=False)
                     if dtype != MixedPrecisionOps._compute_dtype:
@@ -558,7 +552,6 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                         self.bias = torch.nn.Parameter(torch.empty(self.out_features, device=device, dtype=dtype))
                     else:
                         self.register_parameter("bias", None)
->>>>>>> master
                 else:
                     self.quant_format = layer_conf.get("format", None)
                     if self.quant_format is None:
