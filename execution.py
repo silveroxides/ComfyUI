@@ -38,6 +38,91 @@ from comfy_api.internal import _ComfyNodeInternal, _NodeOutputInternal, first_re
 from comfy_api.latest import io, _io
 
 
+# Node classification for execution status throttling
+# Heavyweight nodes always send status, lightweight nodes are throttled
+HEAVYWEIGHT_RETURN_TYPES = {'IMAGE', 'LATENT', 'MODEL', 'CLIP', 'VAE', 'AUDIO', 'VIDEO', 'MASK'}
+HEAVYWEIGHT_CATEGORIES = {'sampling', 'loaders', 'loader', 'image', 'video', 'audio'}
+HEAVYWEIGHT_CLASS_PATTERNS = {'KSampler', 'Load', 'Save', 'Encode', 'Decode', 'VAE'}
+
+def _get_type_string(rt):
+    """Extract string representation from any RETURN_TYPE entry.
+
+    RETURN_TYPES can contain strings, IO enum, ComfyTypeIO classes, or lists.
+    Custom nodes may use str subclasses with broken hash/eq contracts (e.g. AnyType).
+    We must return a plain Python str to ensure safe set membership checks.
+    """
+    try:
+        # Handle strings and str subclasses (convert to plain str for safe hashing)
+        if isinstance(rt, str):
+            # Force to plain Python str in case it's a subclass with broken __eq__/__hash__
+            return str.__str__(rt) if type(rt) is not str else rt
+        if hasattr(rt, 'io_type'):
+            io_type = rt.io_type
+            if io_type is not None:
+                # Recursively handle io_type which may also be a str subclass
+                if isinstance(io_type, str):
+                    return str.__str__(io_type) if type(io_type) is not str else io_type
+                return str(io_type)
+        if isinstance(rt, (list, tuple)):
+            return None
+        return None
+    except Exception:
+        return None
+
+def _is_heavyweight_node(class_def, class_type):
+    """Determine if a node is 'heavyweight' and should always show status.
+
+    Heavyweight nodes deal with images, models, sampling, or file I/O.
+    Lightweight nodes are simple pass-through, math, or string operations.
+    """
+    # Output nodes are always important
+    if getattr(class_def, 'OUTPUT_NODE', False):
+        return True
+
+    # Check return types for heavy data
+    return_types = getattr(class_def, 'RETURN_TYPES', ())
+    for rt in return_types:
+        type_str = _get_type_string(rt)
+        if type_str and type_str in HEAVYWEIGHT_RETURN_TYPES:
+            return True
+
+    # Check category
+    category = getattr(class_def, 'CATEGORY', '')
+    if isinstance(category, str):
+        cat_lower = category.lower()
+        for hw_cat in HEAVYWEIGHT_CATEGORIES:
+            if hw_cat in cat_lower:
+                return True
+
+    # Check class name patterns
+    for pattern in HEAVYWEIGHT_CLASS_PATTERNS:
+        if pattern in class_type:
+            return True
+
+    return False
+
+# Throttle state for execution status messages
+_exec_status_last_send_time = 0.0
+_exec_status_min_interval = 0.05  # 50ms minimum between lightweight node updates
+
+def _should_send_executing_status(class_def, class_type):
+    """Determine if we should send an 'executing' status for this node."""
+    global _exec_status_last_send_time
+
+    # Heavyweight nodes always send
+    if _is_heavyweight_node(class_def, class_type):
+        _exec_status_last_send_time = time.perf_counter()
+        return True
+
+    # Lightweight nodes are throttled
+    current_time = time.perf_counter()
+    if current_time - _exec_status_last_send_time >= _exec_status_min_interval:
+        _exec_status_last_send_time = current_time
+        return True
+
+    return False
+
+
 class ExecutionResult(Enum):
     SUCCESS = 0
     FAILURE = 1
@@ -419,7 +504,8 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
     if cached is not None:
         if server.client_id is not None:
             cached_ui = cached.ui or {}
-            server.send_sync("executed", { "node": unique_id, "display_node": display_node_id, "output": cached_ui.get("output",None), "prompt_id": prompt_id }, server.client_id)
+            if _should_send_executing_status(class_def, class_type):
+                server.send_sync("executed", { "node": unique_id, "display_node": display_node_id, "output": cached_ui.get("output",None), "prompt_id": prompt_id }, server.client_id)
             if cached.ui is not None:
                 ui_outputs[unique_id] = cached.ui
         get_progress_state().finish_progress(unique_id)
@@ -469,7 +555,8 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
             input_data_all, missing_keys, v3_data = get_input_data(inputs, class_def, unique_id, execution_list, dynprompt, extra_data)
             if server.client_id is not None:
                 server.last_node_id = display_node_id
-                server.send_sync("executing", { "node": unique_id, "display_node": display_node_id, "prompt_id": prompt_id }, server.client_id)
+                if _should_send_executing_status(class_def, class_type):
+                    server.send_sync("executing", { "node": unique_id, "display_node": display_node_id, "prompt_id": prompt_id }, server.client_id)
 
             obj = caches.objects.get(unique_id)
             if obj is None:
