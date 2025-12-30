@@ -1011,6 +1011,7 @@ class CLIPType(Enum):
     KANDINSKY5 = 22
     KANDINSKY5_IMAGE = 23
     NEWBIE = 24
+    MISTRAL3_LOCAL = 25
 
 
 def load_clip(ckpt_paths, embedding_directory=None, clip_type=CLIPType.STABLE_DIFFUSION, model_options={}):
@@ -1204,9 +1205,13 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
                 clip_target.clip = comfy.text_encoders.qwen_image.te(**llama_detect(clip_data))
                 clip_target.tokenizer = comfy.text_encoders.qwen_image.QwenImageTokenizer
         elif te_model == TEModel.MISTRAL3_24B or te_model == TEModel.MISTRAL3_24B_PRUNED_FLUX2:
-            clip_target.clip = comfy.text_encoders.flux.flux2_te(**llama_detect(clip_data), pruned=te_model == TEModel.MISTRAL3_24B_PRUNED_FLUX2)
-            clip_target.tokenizer = comfy.text_encoders.flux.Flux2Tokenizer
-            tokenizer_data["tekken_model"] = clip_data[0].get("tekken_model", None)
+            if clip_type == CLIPType.MISTRAL3_LOCAL:
+                clip_target.clip = comfy.text_encoders.flux.flux2_te(**llama_detect(clip_data), pruned=te_model == TEModel.MISTRAL3_24B_PRUNED_FLUX2)
+                clip_target.tokenizer = comfy.text_encoders.flux.Flux2LocalTokenizer
+            else:
+                clip_target.clip = comfy.text_encoders.flux.flux2_te(**llama_detect(clip_data), pruned=te_model == TEModel.MISTRAL3_24B_PRUNED_FLUX2)
+                clip_target.tokenizer = comfy.text_encoders.flux.Flux2Tokenizer
+                tokenizer_data["tekken_model"] = clip_data[0].get("tekken_model", None)
         elif te_model == TEModel.QWEN3_4B:
             clip_target.clip = comfy.text_encoders.z_image.te(**llama_detect(clip_data))
             clip_target.tokenizer = comfy.text_encoders.z_image.ZImageTokenizer

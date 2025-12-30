@@ -123,9 +123,29 @@ class Mistral3Tokenizer(sd1_clip.SDTokenizer):
     def state_dict(self):
         return {"tekken_model": self.tekken_data}
 
+class Mistral3LocalTokenizer(sd1_clip.SDTokenizer):
+    def __init__(self, embedding_directory=None, tokenizer_data={}, min_length=1, pad_token=11):
+        tokenizer_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "tekken_tokenizer")
+        super().__init__(tokenizer_path, pad_with_end=False, embedding_size=5120, embedding_key='mistral3_24b', tokenizer_class=LlamaTokenizerFast, has_end_token=False, pad_to_max_length=False, pad_token=pad_token, max_length=99999999, min_length=min_length, pad_left=True, tokenizer_data=tokenizer_data)
+
+
 class Flux2Tokenizer(sd1_clip.SD1Tokenizer):
     def __init__(self, embedding_directory=None, tokenizer_data={}):
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name="mistral3_24b", tokenizer=Mistral3Tokenizer)
+        self.llama_template = '[SYSTEM_PROMPT]You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object\nattribution and actions without speculation.[/SYSTEM_PROMPT][INST]{}[/INST]'
+
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, **kwargs):
+        if llama_template is None:
+            llama_text = self.llama_template.format(text)
+        else:
+            llama_text = llama_template.format(text)
+
+        tokens = super().tokenize_with_weights(llama_text, return_word_ids=return_word_ids, disable_weights=True, **kwargs)
+        return tokens
+
+class Flux2LocalTokenizer(sd1_clip.SD1Tokenizer):
+    def __init__(self, embedding_directory=None, tokenizer_data={}):
+        super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name="mistral3_24b", tokenizer=Mistral3LocalTokenizer)
         self.llama_template = '[SYSTEM_PROMPT]You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object\nattribution and actions without speculation.[/SYSTEM_PROMPT][INST]{}[/INST]'
 
     def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, **kwargs):
