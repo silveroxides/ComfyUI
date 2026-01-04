@@ -6,6 +6,7 @@ from PIL import Image
 from enum import Enum
 from abc import ABC
 from tqdm import tqdm
+import time
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from comfy_execution.graph import DynamicPrompt
@@ -155,14 +156,22 @@ class WebUIProgressHandler(ProgressHandler):
     def __init__(self, server_instance):
         super().__init__("webui")
         self.server_instance = server_instance
+        self._last_progress_state_time = 0.0
+        self._progress_state_min_interval = 0.05  # 50ms throttle
 
     def set_registry(self, registry: "ProgressRegistry"):
         self.registry = registry
 
-    def _send_progress_state(self, prompt_id: str, nodes: Dict[str, NodeProgressState]):
+    def _send_progress_state(self, prompt_id: str, nodes: Dict[str, NodeProgressState], force: bool = False):
         """Send the current progress state to the client"""
         if self.server_instance is None:
             return
+
+        # Throttle progress_state messages unless forced
+        current_time = time.perf_counter()
+        if not force and current_time - self._last_progress_state_time < self._progress_state_min_interval:
+            return
+        self._last_progress_state_time = current_time
 
         # Only send info for non-pending nodes
         active_nodes = {
