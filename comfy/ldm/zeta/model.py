@@ -380,22 +380,39 @@ class Zeta(nn.Module):
 
         return output
 
-    def _make_img_ids(self, h: int, w: int, offset: int, device) -> Tensor:
-        """Create position IDs for image patches."""
-        ids = torch.zeros(h * w, 3, device=device, dtype=torch.int32)
-        ids[:, 0] = offset  # First dim is text offset
-        for i in range(h):
-            for j in range(w):
-                idx = i * w + j
-                ids[idx, 1] = i
-                ids[idx, 2] = j
-        return ids
+    def _make_img_ids(self, h: int, w: int, txt_len: int, device) -> Tensor:
+        """Create position IDs for image patches - matches Flow's format.
+        
+        Following Flow's prepare_latent_image_ids: creates (h, w, 3) grid where:
+        - ids[..., 0] = offset (txt_len + 1, constant for all patches)
+        - ids[..., 1] = row indices (0 to h-1)
+        - ids[..., 2] = column indices (0 to w-1)
+        Then flattened to (h*w, 3).
+        """
+        # Create grid like Flow does
+        latent_image_ids = torch.zeros(h, w, 3, device=device)
+        
+        # First dim is offset (after text tokens)
+        latent_image_ids[..., 0] = txt_len + 1
+        
+        # Second dim is row position
+        latent_image_ids[..., 1] = torch.arange(h, device=device)[:, None].float()
+        
+        # Third dim is column position
+        latent_image_ids[..., 2] = torch.arange(w, device=device)[None, :].float()
+        
+        # Flatten to (h*w, 3)
+        return latent_image_ids.reshape(h * w, 3).long()
 
     def _make_txt_ids(self, length: int, device) -> Tensor:
-        """Create position IDs for text tokens."""
-        ids = torch.zeros(length, 3, device=device, dtype=torch.int32)
+        """Create position IDs for text tokens - matches Flow's format.
+        
+        Text IDs: each token gets increasing index in dim 0, zeros in dims 1,2.
+        """
+        ids = torch.zeros(length, 3, device=device, dtype=torch.long)
         ids[:, 0] = torch.arange(1, length + 1, device=device)
         return ids
+
 
     def _apply_x0_residual(self, predicted: Tensor, noisy: Tensor, timesteps: Tensor) -> Tensor:
         """Convert x0 prediction to v-prediction for flow matching."""
