@@ -13,6 +13,7 @@ from torch import Tensor
 
 import comfy.ldm.common_dit
 import comfy.ldm.lumina.model as lumina
+import comfy.patcher_extension
 from .layers import SimpleMLPAdaLN
 
 
@@ -50,10 +51,15 @@ class ZetaDCT(nn.Module):
         decoder_num_res_blocks: int = 4,
         decoder_max_freqs: int = 8,
         use_x0: bool = True,
+        # Z-Image modulation flag (unused but passed from detection)
+        z_image_modulation: bool = True,
+        # Padding tokens multiple (optional)
+        pad_tokens_multiple: int = None,
         image_model=None,
         device=None,
         dtype=None,
         operations=None,
+        **kwargs,  # Capture any additional params from unet_config
     ) -> None:
         super().__init__()
         self.dtype = dtype
