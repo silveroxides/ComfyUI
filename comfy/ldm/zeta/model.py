@@ -5,6 +5,7 @@ Ported from Flow repository's model_dct.py.
 """
 
 from typing import List, Optional, Tuple
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
