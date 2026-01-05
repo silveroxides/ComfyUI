@@ -445,10 +445,10 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             if '{}cap_pad_token'.format(key_prefix) in state_dict_keys:
                 dit_config["pad_tokens_multiple"] = 32
             
-            # ZetaDCT detection (has dec_net decoder with x0 prediction)
+            # Zeta detection (has dec_net decoder with x0 prediction)
             dec_net_key = '{}dec_net.cond_embed.weight'.format(key_prefix)
             if dec_net_key in state_dict_keys:
-                dit_config["image_model"] = "zetadct"
+                dit_config["image_model"] = "zeta"
                 dit_config["use_x0"] = True
                 # Extract in_channels from x_embedder.weight: [dim, patch_size^2 * in_channels]
                 x_emb_key = '{}x_embedder.weight'.format(key_prefix)

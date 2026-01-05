@@ -179,8 +179,8 @@ class Flux(SD3):
     def process_out(self, latent):
         return (latent / self.scale_factor) + self.shift_factor
 
-class ZetaDCT(LatentFormat):
-    """ZetaDCT latent format - operates in pixel space via DCT decoder."""
+class Zeta(LatentFormat):
+    """Zeta latent format - operates in pixel space via DCT decoder."""
     latent_channels = 3
 
     def __init__(self):

@@ -1,6 +1,6 @@
-"""ZetaDCT model for ComfyUI.
+"""Zeta model for ComfyUI.
 
-Main transformer model for ZetaDCT, extending Lumina2/Z-Image architecture with DCT decoder.
+Main transformer model for Zeta, extending Lumina2/Z-Image architecture with DCT decoder.
 Ported from Flow repository's model_dct.py.
 """
 
@@ -42,9 +42,9 @@ class ZetaParams:
     z_image_modulation: bool
     pad_tokens_multiple: int
 
-class ZetaDCT(nn.Module):
+class Zeta(nn.Module):
     """
-    ZetaDCT: A diffusion transformer with DCT decoder for enhanced output.
+    Zeta: A diffusion transformer with DCT decoder for enhanced output.
     
     Key differences from base Lumina2/Z-Image:
     - in_channels: 128 (vs 16)
@@ -198,7 +198,7 @@ class ZetaDCT(nn.Module):
         if use_x0:
             self.register_buffer("__x0__", torch.tensor([]))
 
-        # Pixel space VAE marker - ZetaDCT uses a placeholder VAE since it outputs
+        # Pixel space VAE marker - Zeta uses a placeholder VAE since it outputs
         # to pixel space internally via the DCT decoder
         self.register_buffer("pixel_space_vae", torch.tensor([]))
 

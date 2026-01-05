@@ -48,7 +48,7 @@ import comfy.ldm.ace.model
 import comfy.ldm.omnigen.omnigen2
 import comfy.ldm.qwen_image.model
 import comfy.ldm.kandinsky5.model
-import comfy.ldm.zetadct.model
+import comfy.ldm.zeta.model
 
 import comfy.model_management
 import comfy.patcher_extension
@@ -1117,10 +1117,10 @@ class Lumina2(BaseModel):
 
         return out
 
-class ZetaDCT(BaseModel):
-    """ZetaDCT: Z-Image with DCT decoder (pixel-space operation)."""
+class Zeta(BaseModel):
+    """Zeta: Z-Image with DCT decoder (pixel-space operation)."""
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
-        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.zetadct.model.ZetaDCT)
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.zeta.model.Zeta)
 
     def extra_conds(self, **kwargs):
         out = super().extra_conds(**kwargs)
