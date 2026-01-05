@@ -48,6 +48,7 @@ import comfy.ldm.ace.model
 import comfy.ldm.omnigen.omnigen2
 import comfy.ldm.qwen_image.model
 import comfy.ldm.kandinsky5.model
+import comfy.ldm.zetadct.model
 
 import comfy.model_management
 import comfy.patcher_extension
@@ -1120,6 +1121,11 @@ class ZImageX0(Lumina2):
     """Z-Image with x0 (direct) prediction mode."""
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
         super().__init__(model_config, model_type, device=device)
+
+class ZetaDCT(Lumina2):
+    """ZetaDCT: Z-Image with DCT decoder (128 channels)."""
+    def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.zetadct.model.ZetaDCT)
 
 class WAN21(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLOW, image_to_video=False, device=None):

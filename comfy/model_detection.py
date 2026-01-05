@@ -449,6 +449,14 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
                 dit_config["use_x0"] = True
             else:
                 dit_config["use_x0"] = False
+            
+            # ZetaDCT detection (has dec_net decoder)
+            dec_net_key = '{}dec_net.cond_embed.weight'.format(key_prefix)
+            if dec_net_key in state_dict_keys:
+                dit_config["image_model"] = "zetadct"
+                # ZetaDCT uses 128 in_channels
+                dit_config["in_channels"] = 128
+                dit_config["patch_size"] = 1
 
 
         return dit_config
