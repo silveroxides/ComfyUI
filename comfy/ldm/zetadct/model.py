@@ -117,9 +117,9 @@ class ZetaDCT(nn.Module):
             for layer_id in range(n_refiner_layers)
         ])
 
-        # Timestep embedder (uses smaller adaln_embed_dim)
+        # Timestep embedder - checkpoint shows hidden_size=1024, output_size=256
         adaln_embed_dim = 256
-        self.t_embedder = lumina.TimestepEmbedder(min(dim, adaln_embed_dim), dtype=dtype, device=device, operations=operations)
+        self.t_embedder = lumina.TimestepEmbedder(1024, frequency_embedding_size=256, output_size=adaln_embed_dim, dtype=dtype, device=device, operations=operations)
 
         # Caption embedder
         self.cap_embedder = nn.Sequential(
