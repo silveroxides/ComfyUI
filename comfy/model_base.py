@@ -1122,10 +1122,25 @@ class ZImageX0(Lumina2):
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
         super().__init__(model_config, model_type, device=device)
 
-class ZetaDCT(Lumina2):
-    """ZetaDCT: Z-Image with DCT decoder (128 channels)."""
+class ZetaDCT(BaseModel):
+    """ZetaDCT: Z-Image with DCT decoder (pixel-space operation)."""
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
         super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.zetadct.model.ZetaDCT)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        attention_mask = kwargs.get("attention_mask", None)
+        if attention_mask is not None:
+            if torch.numel(attention_mask) != attention_mask.sum():
+                out['attention_mask'] = comfy.conds.CONDRegular(attention_mask)
+            out['num_tokens'] = comfy.conds.CONDConstant(max(1, torch.sum(attention_mask).item()))
+
+        cross_attn = kwargs.get("cross_attn", None)
+        if cross_attn is not None:
+            out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
+            if 'num_tokens' not in out:
+                out['num_tokens'] = comfy.conds.CONDConstant(cross_attn.shape[1])
+        return out
 
 class WAN21(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLOW, image_to_video=False, device=None):
