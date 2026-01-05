@@ -449,9 +449,21 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             dec_net_key = '{}dec_net.cond_embed.weight'.format(key_prefix)
             if dec_net_key in state_dict_keys:
                 dit_config["image_model"] = "zetadct"
-                dit_config["in_channels"] = 128
-                dit_config["patch_size"] = 1
                 dit_config["use_x0"] = True
+                # Extract in_channels from x_embedder.weight: [dim, patch_size^2 * in_channels]
+                x_emb_key = '{}x_embedder.weight'.format(key_prefix)
+                if x_emb_key in state_dict_keys:
+                    w = state_dict[x_emb_key]
+                    dit_config["in_channels"] = w.shape[1]  # patch_size=1, so this is just in_channels
+                    dit_config["patch_size"] = 1
+                else:
+                    dit_config["in_channels"] = 128
+                    dit_config["patch_size"] = 1
+                # Extract decoder_hidden_size from dec_net.cond_embed.weight: [patch^2 * hidden, z_channels]
+                cond_w = state_dict[dec_net_key]
+                dit_config["decoder_hidden_size"] = cond_w.shape[0]  # patch_size=1, so this is hidden_size
+                # Count decoder res_blocks
+                dit_config["decoder_num_res_blocks"] = count_blocks(state_dict_keys, '{}dec_net.res_blocks.'.format(key_prefix) + '{}.')
 
 
         return dit_config
