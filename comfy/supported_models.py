@@ -1052,7 +1052,7 @@ class ZetaDCT(ZImage):
         "use_x0": True,
     }
 
-    latent_format = comfy.latent_formats.ZetaDCT
+    latent_format = comfy.latent_formats.Flux2
 
     def get_model(self, state_dict, prefix="", device=None):
         out = model_base.ZetaDCT(self, device=device)

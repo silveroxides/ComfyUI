@@ -17,6 +17,31 @@ import comfy.patcher_extension
 from .layers import SimpleMLPAdaLN
 
 
+@dataclass
+class ZetaParams:
+    patch_size: int
+    in_channels: int
+    dim: int
+    n_layers: int
+    n_refiner_layers: int
+    n_heads: int
+    n_kv_heads: int
+    multiple_of: int
+    ffn_dim_multiplier: float
+    norm_eps: float
+    qk_norm: bool
+    cap_feat_dim: int
+    axes_dims: List[int]
+    axes_lens: List[int]
+    rope_theta: float
+    time_scale: float
+    decoder_hidden_size: int
+    decoder_num_res_blocks: int
+    decoder_max_freqs: int
+    use_x0: bool
+    z_image_modulation: bool
+    pad_tokens_multiple: int
+
 class ZetaDCT(nn.Module):
     """
     ZetaDCT: A diffusion transformer with DCT decoder for enhanced output.
