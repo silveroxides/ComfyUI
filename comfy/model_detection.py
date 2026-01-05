@@ -444,6 +444,12 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             dit_config["time_scale"] = 1000.0
             if '{}cap_pad_token'.format(key_prefix) in state_dict_keys:
                 dit_config["pad_tokens_multiple"] = 32
+            # Z-Image x0 variant detection
+            if '{}__x0__'.format(key_prefix) in state_dict_keys:
+                dit_config["use_x0"] = True
+            else:
+                dit_config["use_x0"] = False
+
 
         return dit_config
 

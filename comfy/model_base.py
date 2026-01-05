@@ -1116,6 +1116,11 @@ class Lumina2(BaseModel):
 
         return out
 
+class ZImageX0(Lumina2):
+    """Z-Image with x0 (direct) prediction mode."""
+    def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
+        super().__init__(model_config, model_type, device=device)
+
 class WAN21(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLOW, image_to_video=False, device=None):
         super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.wan.model.WanModel)

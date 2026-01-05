@@ -379,6 +379,7 @@ class NextDiT(nn.Module):
         pad_tokens_multiple=None,
         clip_text_dim=None,
         image_model=None,
+        use_x0=False,
         device=None,
         dtype=None,
         operations=None,
@@ -505,6 +506,10 @@ class NextDiT(nn.Module):
         self.rope_embedder = EmbedND(dim=dim // n_heads, theta=rope_theta, axes_dim=axes_dims)
         self.dim = dim
         self.n_heads = n_heads
+
+        # Z-Image x0 variant support
+        if use_x0:
+            self.register_buffer("__x0__", torch.tensor([]))
 
     def unpatchify(
         self, x: torch.Tensor, img_size: List[Tuple[int, int]], cap_size: List[int], return_tensor=False
@@ -652,5 +657,14 @@ class NextDiT(nn.Module):
         img = self.final_layer(img, adaln_input)
         img = self.unpatchify(img, img_size, cap_size, return_tensor=x_is_tensor)[:, :, :h, :w]
 
+        # If x0 variant, convert x0 prediction to v-prediction
+        if hasattr(self, "__x0__"):
+            return self._apply_x0_residual(-img, x[:, :, :h, :w], timesteps)
+
         return -img
+
+    def _apply_x0_residual(self, predicted, noisy, timesteps):
+        """Convert x0 prediction to v-prediction for flow matching."""
+        eps = 0.0  # No epsilon needed at inference
+        return (noisy - predicted) / (timesteps.view(-1, 1, 1, 1) + eps)
 
