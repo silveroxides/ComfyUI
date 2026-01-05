@@ -16,9 +16,9 @@ import torch.nn.functional as F
 from torch import Tensor
 
 import comfy.ldm.common_dit
-import comfy.ldm.lumina.model as lumina
+import comfy.ldm.lumina.model as lumina  # For TimestepEmbedder only
 import comfy.patcher_extension
-from .layers import SimpleMLPAdaLN
+from .layers import SimpleMLPAdaLN, RopeEmbedder, ZImageTransformerBlock, ZImageRMSNorm
 
 # Diagnostic logging for Zeta model
 _zeta_logger = None
@@ -156,44 +156,44 @@ class Zeta(nn.Module):
             dtype=dtype,
         )
 
-        # Noise refiner blocks  
+        # Noise refiner blocks (use native Zeta blocks)
+        adaln_embed_dim = 256
         self.noise_refiner = nn.ModuleList([
-            lumina.JointTransformerBlock(
-                layer_id,
+            ZImageTransformerBlock(
+                1000 + layer_id,
                 dim,
                 n_heads,
                 n_kv_heads,
-                multiple_of,
-                ffn_dim_multiplier,
                 norm_eps,
                 qk_norm,
                 modulation=True,
-                z_image_modulation=True,
-                operation_settings=operation_settings,
+                adaln_embed_dim=adaln_embed_dim,
+                dtype=dtype,
+                device=device,
+                operations=operations,
             )
             for layer_id in range(n_refiner_layers)
         ])
 
-        # Context refiner blocks
+        # Context refiner blocks (use native Zeta blocks)
         self.context_refiner = nn.ModuleList([
-            lumina.JointTransformerBlock(
+            ZImageTransformerBlock(
                 layer_id,
                 dim,
                 n_heads,
                 n_kv_heads,
-                multiple_of,
-                ffn_dim_multiplier,
                 norm_eps,
                 qk_norm,
                 modulation=False,
-                z_image_modulation=True,
-                operation_settings=operation_settings,
+                adaln_embed_dim=adaln_embed_dim,
+                dtype=dtype,
+                device=device,
+                operations=operations,
             )
             for layer_id in range(n_refiner_layers)
         ])
 
         # Timestep embedder - checkpoint shows hidden_size=1024, output_size=256
-        adaln_embed_dim = 256
         self.t_embedder = lumina.TimestepEmbedder(1024, frequency_embedding_size=256, output_size=adaln_embed_dim, dtype=dtype, device=device, operations=operations)
 
         # Caption embedder
@@ -206,29 +206,30 @@ class Zeta(nn.Module):
         self.x_pad_token = nn.Parameter(torch.empty((1, dim), device=device, dtype=dtype))
         self.cap_pad_token = nn.Parameter(torch.empty((1, dim), device=device, dtype=dtype))
 
-        # Main transformer layers
+        # Main transformer layers (use native Zeta blocks)
         self.layers = nn.ModuleList([
-            lumina.JointTransformerBlock(
+            ZImageTransformerBlock(
                 layer_id,
                 dim,
                 n_heads,
                 n_kv_heads,
-                multiple_of,
-                ffn_dim_multiplier,
                 norm_eps,
                 qk_norm,
                 modulation=True,
-                z_image_modulation=True,
-                operation_settings=operation_settings,
+                adaln_embed_dim=adaln_embed_dim,
+                dtype=dtype,
+                device=device,
+                operations=operations,
             )
             for layer_id in range(n_layers)
         ])
 
-        # RoPE embedder
+        # RoPE embedder (use native Zeta RopeEmbedder)
         assert (dim // n_heads) == sum(axes_dims)
         self.axes_dims = axes_dims
         self.axes_lens = axes_lens
-        self.rope_embedder = lumina.EmbedND(dim=dim // n_heads, theta=rope_theta, axes_dim=axes_dims)
+        self.rope_embedder = RopeEmbedder(theta=rope_theta, axes_dims=axes_dims, axes_lens=axes_lens)
+        self.adaln_embed_dim = adaln_embed_dim
 
         # DCT decoder network
         self.dec_net = SimpleMLPAdaLN(
@@ -320,7 +321,7 @@ class Zeta(nn.Module):
 
         _log_zeta(f"  img_pe.shape (after rope_embedder): {img_pe.shape}")
         _log_zeta(f"  txt_pe.shape (after rope_embedder): {txt_pe.shape}")
-        _log_zeta(f"  Expected: each should be (B, seq_len, n_heads, head_dim/2, 2, 2) for Lumina RoPE")
+        _log_zeta(f"  Expected: complex tensor of shape (B, seq_len, head_dim/2) for native Zeta RoPE")
 
         # Masks
         img_mask = torch.ones((B, num_patches), device=x.device, dtype=torch.bool)
