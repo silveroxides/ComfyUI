@@ -6,6 +6,9 @@ Ported from Flow repository's model_dct.py.
 
 from typing import List, Optional, Tuple
 from dataclasses import dataclass
+import os
+import logging
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -16,6 +19,33 @@ import comfy.ldm.common_dit
 import comfy.ldm.lumina.model as lumina
 import comfy.patcher_extension
 from .layers import SimpleMLPAdaLN
+
+# Diagnostic logging for Zeta model
+_zeta_logger = None
+_zeta_log_file = None
+
+def _get_zeta_logger():
+    """Get or create the Zeta diagnostic logger."""
+    global _zeta_logger, _zeta_log_file
+    if _zeta_logger is None:
+        try:
+            import folder_paths
+            output_dir = folder_paths.get_output_directory()
+        except:
+            output_dir = "."
+        _zeta_log_file = os.path.join(output_dir, f"zeta_debug_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+        _zeta_logger = logging.getLogger("ZetaDebug")
+        _zeta_logger.setLevel(logging.DEBUG)
+        handler = logging.FileHandler(_zeta_log_file)
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        _zeta_logger.addHandler(handler)
+        _zeta_logger.info(f"Zeta diagnostic log started. Log file: {_zeta_log_file}")
+    return _zeta_logger
+
+def _log_zeta(msg: str):
+    """Log a diagnostic message."""
+    logger = _get_zeta_logger()
+    logger.info(msg)
 
 
 @dataclass
@@ -97,6 +127,25 @@ class Zeta(nn.Module):
         self.time_scale = time_scale
         self.dim = dim
         self.n_heads = n_heads
+
+        # Log all received parameters for debugging
+        _log_zeta("=" * 60)
+        _log_zeta("Zeta.__init__ called with:")
+        _log_zeta(f"  patch_size={patch_size}, in_channels={in_channels}")
+        _log_zeta(f"  dim={dim}, n_layers={n_layers}, n_refiner_layers={n_refiner_layers}")
+        _log_zeta(f"  n_heads={n_heads}, n_kv_heads={n_kv_heads}")
+        _log_zeta(f"  axes_dims={axes_dims}, axes_lens={axes_lens}")
+        _log_zeta(f"  rope_theta={rope_theta}, time_scale={time_scale}")
+        _log_zeta(f"  cap_feat_dim={cap_feat_dim}, use_x0={use_x0}")
+        _log_zeta(f"  decoder_hidden_size={decoder_hidden_size}, decoder_num_res_blocks={decoder_num_res_blocks}")
+        _log_zeta(f"  ffn_dim_multiplier={ffn_dim_multiplier}, multiple_of={multiple_of}")
+        _log_zeta(f"  z_image_modulation={z_image_modulation}, pad_tokens_multiple={pad_tokens_multiple}")
+        _log_zeta(f"  image_model={image_model}")
+        _log_zeta(f"  Extra kwargs: {kwargs}")
+        _log_zeta(f"  Expected head_dim: dim/n_heads = {dim}/{n_heads} = {dim // n_heads}")
+        _log_zeta(f"  Sum of axes_dims: {sum(axes_dims)}")
+        _log_zeta(f"  head_dim == sum(axes_dims)? {dim // n_heads == sum(axes_dims)}")
+        _log_zeta("=" * 60)
 
         # Input embedder
         self.x_embedder = operations.Linear(
@@ -216,6 +265,16 @@ class Zeta(nn.Module):
         cap_mask = attention_mask
         bs, c, h, w = x.shape
         
+        # Log forward pass inputs
+        _log_zeta("-" * 60)
+        _log_zeta("Zeta._forward called:")
+        _log_zeta(f"  Input x.shape: {x.shape} (B, C, H, W)")
+        _log_zeta(f"  context.shape: {cap_feats.shape}")
+        _log_zeta(f"  num_tokens: {num_tokens}")
+        _log_zeta(f"  timesteps: {timesteps}")
+        if attention_mask is not None:
+            _log_zeta(f"  attention_mask.shape: {attention_mask.shape}")
+        
         x = comfy.ldm.common_dit.pad_to_patch_size(x, (self.patch_size, self.patch_size))
 
         # Store raw input for decoder
@@ -228,6 +287,9 @@ class Zeta(nn.Module):
         num_patches = num_patches_h * num_patches_w
         img = img.view(B, num_patches, -1)  # [B, N, C*P*P]
         
+        _log_zeta(f"  After patchify: num_patches_h={num_patches_h}, num_patches_w={num_patches_w}, total={num_patches}")
+        _log_zeta(f"  img.shape after patchify: {img.shape}")
+        
         # Store pixel values for decoder: [B*N, P*P, C]
         pixel_values = img.view(B * num_patches, self.patch_size ** 2, self.in_channels)
 
@@ -239,13 +301,26 @@ class Zeta(nn.Module):
         img_hidden = self.x_embedder(img)
         txt_hidden = self.cap_embedder(cap_feats)
 
+        _log_zeta(f"  img_hidden.shape (after x_embedder): {img_hidden.shape}")
+        _log_zeta(f"  txt_hidden.shape (after cap_embedder): {txt_hidden.shape}")
+        _log_zeta(f"  t_emb.shape: {t_emb.shape}")
+
         # Compute position IDs and RoPE
         # For image: create position IDs based on patch positions
         img_ids = self._make_img_ids(num_patches_h, num_patches_w, num_tokens, x.device)
         txt_ids = self._make_txt_ids(num_tokens, x.device)
         
+        _log_zeta(f"  img_ids.shape: {img_ids.shape}")
+        _log_zeta(f"  txt_ids.shape: {txt_ids.shape}")
+        _log_zeta(f"  img_ids expanded shape: {img_ids.unsqueeze(0).expand(B, -1, -1).shape}")
+        _log_zeta(f"  txt_ids expanded shape: {txt_ids.unsqueeze(0).expand(B, -1, -1).shape}")
+        
         img_pe = self.rope_embedder(img_ids.unsqueeze(0).expand(B, -1, -1))
         txt_pe = self.rope_embedder(txt_ids.unsqueeze(0).expand(B, -1, -1))
+
+        _log_zeta(f"  img_pe.shape (after rope_embedder): {img_pe.shape}")
+        _log_zeta(f"  txt_pe.shape (after rope_embedder): {txt_pe.shape}")
+        _log_zeta(f"  Expected: each should be (B, seq_len, n_heads, head_dim/2, 2, 2) for Lumina RoPE")
 
         # Masks
         img_mask = torch.ones((B, num_patches), device=x.device, dtype=torch.bool)
@@ -253,6 +328,10 @@ class Zeta(nn.Module):
             txt_mask = torch.ones((B, cap_feats.shape[1]), device=x.device, dtype=torch.bool)
         else:
             txt_mask = cap_mask.bool()
+
+        _log_zeta(f"  img_mask.shape: {img_mask.shape}")
+        _log_zeta(f"  txt_mask.shape: {txt_mask.shape}")
+        _log_zeta("-" * 60)
 
         # Noise refiner
         for layer in self.noise_refiner:
