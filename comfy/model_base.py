@@ -1117,11 +1117,6 @@ class Lumina2(BaseModel):
 
         return out
 
-class ZImageX0(Lumina2):
-    """Z-Image with x0 (direct) prediction mode."""
-    def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
-        super().__init__(model_config, model_type, device=device)
-
 class ZetaDCT(BaseModel):
     """ZetaDCT: Z-Image with DCT decoder (pixel-space operation)."""
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
