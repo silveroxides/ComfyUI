@@ -756,7 +756,7 @@ class Flux2(Flux):
     unet_extra_config = {}
     latent_format = latent_formats.Flux2
 
-    # memory_usage_factor = 2.4 # TODO: debug why flux mem usage is so weird on windows.
+    # memory_usage_factor = 3.4 # TODO: debug why flux mem usage is so weird on windows.
 
     supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]
 
@@ -765,7 +765,10 @@ class Flux2(Flux):
 
     def __init__(self, unet_config):
         super().__init__(unet_config)
-        self.memory_usage_factor = self.memory_usage_factor * (2.0 * 2.0) * (unet_config['hidden_size'] / 2604)
+        hidden_size = unet_config['hidden_size']
+        context_in_dim = unet_config['context_in_dim']
+        modifier_factor = ((hidden_size / context_in_dim) * 2.0)
+        self.memory_usage_factor = self.memory_usage_factor * (2.0 * 2.0) * ((hidden_size * modifier_factor) / 2604)
 
     def get_model(self, state_dict, prefix="", device=None):
         out = model_base.Flux2(self, device=device)
