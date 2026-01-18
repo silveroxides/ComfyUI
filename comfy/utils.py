@@ -931,7 +931,9 @@ def bislerp(samples, width, height):
     return result.to(orig_dtype)
 
 def lanczos(samples, width, height):
-    images = [Image.fromarray(np.clip(255. * image.movedim(0, -1).cpu().numpy(), 0, 255).astype(np.uint8)) for image in samples]
+    #the below API is strict and expects grayscale to be squeezed
+    samples = samples.squeeze(1) if samples.shape[1] == 1 else samples.movedim(1, -1)
+    images = [Image.fromarray(np.clip(255. * image.cpu().numpy(), 0, 255).astype(np.uint8)) for image in samples]
     images = [image.resize((width, height), resample=Image.Resampling.LANCZOS) for image in images]
     images = [torch.from_numpy(np.array(image).astype(np.float32) / 255.0).movedim(-1, 0) for image in images]
     result = torch.stack(images)
@@ -1275,7 +1277,7 @@ def unpack_latents(combined_latent, latent_shapes):
             combined_latent = combined_latent[:, :, cut:]
             output_tensors.append(tens.reshape([tens.shape[0]] + list(shape)[1:]))
     else:
-        output_tensors = combined_latent
+        output_tensors = [combined_latent]
     return output_tensors
 
 def detect_layer_quantization(state_dict, prefix):
@@ -1307,6 +1309,8 @@ def convert_old_quants(state_dict, model_prefix="", metadata={}):
             out_sd = {}
             layers = {}
             for k in list(state_dict.keys()):
+                if k == scaled_fp8_key:
+                    continue
                 if not k.startswith(model_prefix):
                     out_sd[k] = state_dict[k]
                     continue
