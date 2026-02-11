@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import collections
-import copy
 import inspect
 import logging
 import math
@@ -317,7 +316,7 @@ class ModelPatcher:
 
         n.object_patches = self.object_patches.copy()
         n.weight_wrapper_patches = self.weight_wrapper_patches.copy()
-        n.model_options = copy.deepcopy(self.model_options)
+        n.model_options = comfy.utils.deepcopy_list_dict(self.model_options)
         n.backup = self.backup
         n.object_patches_backup = self.object_patches_backup
         n.parent = self
@@ -1492,7 +1491,9 @@ class ModelPatcherDynamic(ModelPatcher):
             if vbar is not None:
                 vbar.prioritize()
 
-            #We have way more tools for acceleration on comfy weight offloading, so always
+            #We force reserve VRAM for the non comfy-weight so we dont have to deal
+            #with pin and unpin syncrhonization which can be expensive for small weights
+            #with a high layer rate (e.g. autoregressive LLMs).
             #prioritize the non-comfy weights (note the order reverse).
             loading = self._load_list(prio_comfy_cast_weights=True)
             loading.sort(reverse=True)
@@ -1524,7 +1525,7 @@ class ModelPatcherDynamic(ModelPatcher):
                     setattr(m, param_key + "_function", weight_function)
                     geometry = weight
                     if not isinstance(weight, QuantizedTensor):
-                        model_dtype = getattr(m, param_key + "_comfy_model_dtype", weight.dtype)
+                        model_dtype = getattr(m, param_key + "_comfy_model_dtype", None) or weight.dtype
                         weight._model_dtype = model_dtype
                         geometry = comfy.memory_management.TensorGeometry(shape=weight.shape, dtype=model_dtype)
                     return comfy.memory_management.vram_aligned_size(geometry)
@@ -1550,13 +1551,14 @@ class ModelPatcherDynamic(ModelPatcher):
                         weight.seed_key = key
                         set_dirty(weight, dirty)
                         geometry = weight
-                        model_dtype = getattr(m, param + "_comfy_model_dtype", weight.dtype)
+                        model_dtype = getattr(m, param + "_comfy_model_dtype", None) or weight.dtype
                         geometry = comfy.memory_management.TensorGeometry(shape=weight.shape, dtype=model_dtype)
                         weight_size = geometry.numel() * geometry.element_size()
                         if vbar is not None and not hasattr(weight, "_v"):
                             weight._v = vbar.alloc(weight_size)
                             weight._model_dtype = model_dtype
                         allocated_size += weight_size
+                    vbar.set_watermark_limit(allocated_size)
 
             logging.info(f"Model {self.model.__class__.__name__} prepared for dynamic VRAM loading. {allocated_size // (1024 ** 2)}MB Staged. {num_patches} patches attached.")
 

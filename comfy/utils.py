@@ -27,6 +27,7 @@ from PIL import Image
 import logging
 import itertools
 from torch.nn.functional import interpolate
+from tqdm.auto import trange
 from einops import rearrange
 from comfy.cli_args import args, enables_dynamic_vram
 import json
@@ -1155,6 +1156,32 @@ def tiled_scale_multidim(samples, function, tile=(64, 64), overlap=8, upscale_am
 def tiled_scale(samples, function, tile_x=64, tile_y=64, overlap = 8, upscale_amount = 4, out_channels = 3, output_device="cpu", pbar = None):
     return tiled_scale_multidim(samples, function, (tile_y, tile_x), overlap=overlap, upscale_amount=upscale_amount, out_channels=out_channels, output_device=output_device, pbar=pbar)
 
+def model_trange(*args, **kwargs):
+    if comfy.memory_management.aimdo_allocator is None:
+        return trange(*args, **kwargs)
+
+    pbar = trange(*args, **kwargs, smoothing=1.0)
+    pbar._i = 0
+    pbar.set_postfix_str("  Model Initializing ...  ")
+
+    _update = pbar.update
+
+    def warmup_update(n=1):
+        pbar._i += 1
+        if pbar._i == 1:
+            pbar.i1_time = time.time()
+            pbar.set_postfix_str(" Model Initialization complete!  ")
+        elif pbar._i == 2:
+            #bring forward the effective start time based the the diff between first and second iteration
+            #to attempt to remove load overhead from the final step rate estimate.
+            pbar.start_t = pbar.i1_time - (time.time() - pbar.i1_time)
+            pbar.set_postfix_str("")
+
+        _update(n)
+
+    pbar.update = warmup_update
+    return pbar
+
 PROGRESS_BAR_ENABLED = True
 def set_progress_bar_enabled(enabled):
     global PROGRESS_BAR_ENABLED
@@ -1376,3 +1403,21 @@ def string_to_seed(data):
             else:
                 crc >>= 1
     return crc ^ 0xFFFFFFFF
+
+def deepcopy_list_dict(obj, memo=None):
+    if memo is None:
+        memo = {}
+
+    obj_id = id(obj)
+    if obj_id in memo:
+        return memo[obj_id]
+
+    if isinstance(obj, dict):
+        res = {deepcopy_list_dict(k, memo): deepcopy_list_dict(v, memo) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        res = [deepcopy_list_dict(i, memo) for i in obj]
+    else:
+        res = obj
+
+    memo[obj_id] = res
+    return res
