@@ -51,6 +51,7 @@ import comfy.ldm.qwen_image.model
 import comfy.ldm.kandinsky5.model
 import comfy.ldm.anima.model
 import comfy.ldm.ace.ace_step15
+import comfy.ldm.modules.diffusionmodules.self_flow
 
 import comfy.model_management
 import comfy.patcher_extension
@@ -77,6 +78,7 @@ class ModelType(Enum):
     IMG_TO_IMG = 9
     FLOW_COSMOS = 10
     IMG_TO_IMG_FLOW = 11
+    FLOW_SELF = 12
 
 
 def model_sampling(model_config, model_type):
@@ -111,6 +113,9 @@ def model_sampling(model_config, model_type):
         s = comfy.model_sampling.ModelSamplingCosmosRFlow
     elif model_type == ModelType.IMG_TO_IMG_FLOW:
         c = comfy.model_sampling.IMG_TO_IMG_FLOW
+    elif model_type == ModelType.FLOW_SELF:
+        c = comfy.model_sampling.CONST
+        s = comfy.model_sampling.ModelSamplingSelfFlow
 
     class ModelSampling(s, c):
         pass
@@ -1923,3 +1928,16 @@ class Kandinsky5Image(Kandinsky5):
 
     def concat_cond(self, **kwargs):
         return None
+
+class SelfFlow(BaseModel):
+    def __init__(self, model_config, model_type=ModelType.FLOW_SELF, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.modules.diffusionmodules.self_flow.SelfFlowPerTokenDiT)
+
+    def encode_adm(self, **kwargs):
+        return None
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        # Class labels or empty
+        return out
+

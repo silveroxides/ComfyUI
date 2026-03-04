@@ -397,3 +397,23 @@ class ModelSamplingCosmosRFlow(ModelSamplingContinuousEDM):
             return sigma_max
 
         return timestep / (1 - timestep)
+
+
+class ModelSamplingSelfFlow(ModelSamplingDiscreteFlow):
+    """Flow-matching sampler for Self-Flow models.
+
+    Uses a linear interpolation path x_t = t * x_1 + (1-t) * noise
+    with no time-shift (shift=1.0). The model predicts velocity and
+    internally handles the t -> (1-t) mapping.
+    """
+    def __init__(self, model_config=None):
+        super().__init__(model_config)
+        if model_config is not None:
+            sampling_settings = model_config.sampling_settings
+        else:
+            sampling_settings = {}
+
+        self.set_parameters(
+            shift=sampling_settings.get("shift", 1.0),
+            multiplier=sampling_settings.get("multiplier", 1000),
+        )
