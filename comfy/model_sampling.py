@@ -403,8 +403,10 @@ class ModelSamplingSelfFlow(ModelSamplingDiscreteFlow):
     """Flow-matching sampler for Self-Flow models.
 
     Uses a linear interpolation path x_t = t * x_1 + (1-t) * noise
-    with no time-shift (shift=1.0). The model predicts velocity and
-    internally handles the t -> (1-t) mapping.
+    with no time-shift (shift=1.0). The model's t_embedder was trained
+    with timesteps in [0, 1] where 1=noisy and 0=clean, matching
+    ComfyUI's sigma convention. multiplier=1.0 ensures timestep(sigma)
+    returns sigma directly without rescaling.
     """
     def __init__(self, model_config=None):
         super().__init__(model_config)
@@ -415,5 +417,5 @@ class ModelSamplingSelfFlow(ModelSamplingDiscreteFlow):
 
         self.set_parameters(
             shift=sampling_settings.get("shift", 1.0),
-            multiplier=sampling_settings.get("multiplier", 1000),
+            multiplier=sampling_settings.get("multiplier", 1.0),
         )

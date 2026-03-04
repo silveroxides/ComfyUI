@@ -341,7 +341,7 @@ class ModelSamplingSelfFlow:
             pass
 
         model_sampling = ModelSamplingAdvanced(model.model.model_config)
-        model_sampling.set_parameters(shift=shift, multiplier=1000)
+        model_sampling.set_parameters(shift=shift, multiplier=1.0)
         m.add_object_patch("model_sampling", model_sampling)
         return (m, )
 
