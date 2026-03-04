@@ -1810,3 +1810,145 @@ def sample_sa_solver(model, x, sigmas, extra_args=None, callback=None, disable=F
 def sample_sa_solver_pece(model, x, sigmas, extra_args=None, callback=None, disable=False, tau_func=None, s_noise=1.0, noise_sampler=None, predictor_order=3, corrector_order=4, simple_order_2=False):
     """Stochastic Adams Solver with PECE (Predict–Evaluate–Correct–Evaluate) mode (NeurIPS 2023)."""
     return sample_sa_solver(model, x, sigmas, extra_args=extra_args, callback=callback, disable=disable, tau_func=tau_func, s_noise=s_noise, noise_sampler=noise_sampler, predictor_order=predictor_order, corrector_order=corrector_order, use_pece=True, simple_order_2=simple_order_2)
+
+
+@torch.no_grad()
+def sample_selfflow_sde(model, x, sigmas, extra_args=None, callback=None, disable=None,
+                         diffusion_form="sigma", diffusion_norm=1.0,
+                         last_step="Mean", last_step_size=0.04,
+                         s_noise=1.0, noise_sampler=None):
+    """Self-Flow SDE sampler (Euler-Maruyama).
+
+    Implements the SDE integrator from the Self-Flow paper using the ICPlan
+    (linear interpolation path) with score-from-velocity correction.
+
+    Reference: Self-Flow sampling.py — FixedSampler.sample_sde() + ICPlan
+
+    In the ICPlan linear path:
+        alpha_t = t, sigma_t = 1 - t
+        score = (t * velocity - x) / (t * (1 - t))
+
+    The SDE drift is: velocity + diffusion(t) * score
+    Step: x = x + drift * dt + sqrt(2 * diffusion) * dW
+
+    Args:
+        diffusion_form: Form of the diffusion coefficient.
+            "sigma": norm * (1 - t)  [default]
+            "constant": norm
+            "SBDM": norm * drift_diffusion_term
+            "linear": norm * (1 - t)
+            "decreasing": 0.25 * (norm * cos(pi*t) + 1)^2
+            "increasing-decreasing": norm * sin(pi*t)^2
+        diffusion_norm: Scaling factor for diffusion (default: 1.0)
+        last_step: Final denoising step type - "Mean" or "Euler" or None
+        last_step_size: Size of the last step interval (default: 0.04)
+        s_noise: Noise scaling factor (default: 1.0)
+    """
+    extra_args = {} if extra_args is None else extra_args
+    seed = extra_args.get("seed", None)
+    noise_sampler = default_noise_sampler(x, seed=seed) if noise_sampler is None else noise_sampler
+    s_in = x.new_ones([x.shape[0]])
+
+    # ---- ICPlan helper functions (linear path: alpha=t, sigma=1-t) ----
+    def expand_t(t, x_ref):
+        """Reshape scalar t to broadcastable dims."""
+        return t.view(t.shape[0], *([1] * (x_ref.ndim - 1)))
+
+    def compute_diffusion_coeff(x_ref, t_expanded, form, norm):
+        """Compute the diffusion coefficient for the given form."""
+        if form == "constant":
+            return norm
+        elif form == "sigma":
+            return norm * (1 - t_expanded)
+        elif form == "linear":
+            return norm * (1 - t_expanded)
+        elif form == "SBDM":
+            # drift diffusion = alpha'/alpha * sigma^2 - sigma * sigma'
+            # = (1/t) * (1-t)^2 - (1-t)*(-1) = (1-t)^2/t + (1-t)
+            # = (1-t) * ((1-t)/t + 1) = (1-t) * (1/t) = (1-t)/t
+            return norm * (1 - t_expanded) / t_expanded
+        elif form == "decreasing":
+            return 0.25 * (norm * torch.cos(math.pi * t_expanded) + 1) ** 2
+        elif form == "increasing-decreasing":
+            return norm * torch.sin(math.pi * t_expanded) ** 2
+        else:
+            return norm  # fallback to constant
+
+    def compute_score_from_velocity(velocity, x_ref, t_expanded):
+        """ICPlan: score = (t * v - x) / (t * (1-t))."""
+        # alpha_t = t, d_alpha = 1, sigma_t = 1-t, d_sigma = -1
+        # reverse_alpha_ratio = t / 1 = t
+        # var = (1-t)^2 - t * (-1) * (1-t) = (1-t)^2 + t*(1-t) = (1-t)
+        # score = (t * v - x) / (1-t)
+        # But reference uses: var = sigma_t^2 - (alpha_t / d_alpha_t) * d_sigma_t * sigma_t
+        # = (1-t)^2 - t * (-1) * (1-t) = (1-t)^2 + t(1-t) = (1-t)(1-t+t) = (1-t)
+        var = (1 - t_expanded)
+        score = (t_expanded * velocity - x_ref) / var.clamp(min=1e-6)
+        return score
+
+    # ---- Main sampling loop ----
+    for i in trange(len(sigmas) - 1, disable=disable):
+        sigma_cur = sigmas[i]
+        sigma_next = sigmas[i + 1]
+
+        if sigma_next == 0:
+            # Final step: just return denoised
+            denoised = model(x, sigma_cur * s_in, **extra_args)
+            if callback is not None:
+                callback({'x': x, 'i': i, 'sigma': sigma_cur, 'sigma_hat': sigma_cur, 'denoised': denoised})
+            x = denoised
+            continue
+
+        # Get model prediction (denoised) and derive velocity
+        denoised = model(x, sigma_cur * s_in, **extra_args)
+        if callback is not None:
+            callback({'x': x, 'i': i, 'sigma': sigma_cur, 'sigma_hat': sigma_cur, 'denoised': denoised})
+
+        # In ComfyUI sigma = 1-t (noise fraction), so t = 1-sigma
+        t = 1 - sigma_cur
+        t_next = 1 - sigma_next
+        dt = t_next - t  # positive (t increases as sigma decreases)
+        t_vec = expand_t(t * s_in, x)
+
+        # Velocity from denoised: v = (x - denoised) / sigma = (x - x0) / (1 - t)
+        # This is the ODE derivative in sigma-space, but we need velocity in t-space
+        # In the reference, velocity = model_output (the raw model prediction)
+        # In ComfyUI: d = to_d(x, sigma, denoised) = (x - denoised) / sigma
+        # The model output (velocity in t-space) = -d (negated direction)
+        # because d(x)/dt = -d(x)/d(sigma) since sigma = 1 - t
+        velocity = -(x - denoised) / utils.append_dims(sigma_cur, x.ndim)
+
+        # Compute score from velocity
+        score = compute_score_from_velocity(velocity, x, t_vec)
+
+        # Compute diffusion coefficient
+        diffusion = compute_diffusion_coeff(x, t_vec, diffusion_form, diffusion_norm)
+
+        # SDE drift = velocity + diffusion * score
+        sde_drift = velocity + diffusion * score
+
+        # Check if this is the last SDE step and we need a special last step
+        is_last_sde_step = (i == len(sigmas) - 2) or (sigmas[i + 2] == 0 if i + 2 < len(sigmas) else True)
+
+        if is_last_sde_step and last_step is not None:
+            # Apply the last step function (Mean or Euler)
+            if last_step == "Mean":
+                # Mean: x = x + sde_drift * last_step_size
+                x = x + sde_drift * last_step_size
+            elif last_step == "Euler":
+                # Euler: x = x + velocity * last_step_size
+                x = x + velocity * last_step_size
+            else:
+                # Default Euler step
+                x = x + sde_drift * dt
+        else:
+            # Euler-Maruyama step
+            # mean_x = x + drift * dt
+            mean_x = x + sde_drift * dt
+            # Stochastic noise: sqrt(2 * diffusion) * dW
+            # dW ~ N(0, |dt|)
+            dw = noise_sampler(sigma_cur, sigma_next) * (abs(dt) ** 0.5) * s_noise
+            x = mean_x + torch.sqrt(2 * diffusion) * dw
+
+    return x
+

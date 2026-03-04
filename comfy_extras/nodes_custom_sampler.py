@@ -1049,6 +1049,45 @@ class ManualSigmas(io.ComfyNode):
         sigmas = torch.FloatTensor(sigmas)
         return io.NodeOutput(sigmas)
 
+class SamplerSelfFlowSDE(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="SamplerSelfFlowSDE",
+            display_name="SamplerSelfFlowSDE",
+            search_aliases=["self-flow", "selfflow", "sde"],
+            category="sampling/custom_sampling/samplers",
+            inputs=[
+                io.Combo.Input("diffusion_form", options=["sigma", "constant", "SBDM", "linear", "decreasing", "increasing-decreasing"],
+                               tooltip="Form of the SDE diffusion coefficient.\nsigma: norm*(1-t) [default]\nconstant: norm\nSBDM: norm*(1-t)/t"),
+                io.Float.Input("diffusion_norm", default=1.0, min=0.0, max=10.0, step=0.01, round=False,
+                               tooltip="Scaling factor for diffusion coefficient", advanced=True),
+                io.Combo.Input("last_step", options=["Mean", "Euler", "None"],
+                               tooltip="Final denoising step type.\nMean: drift-corrected last step\nEuler: velocity-only last step\nNone: no special last step"),
+                io.Float.Input("last_step_size", default=0.04, min=0.0, max=0.5, step=0.001, round=False,
+                               tooltip="Size of the last step interval", advanced=True),
+                io.Float.Input("s_noise", default=1.0, min=0.0, max=100.0, step=0.01, round=False, advanced=True),
+            ],
+            outputs=[io.Sampler.Output()]
+        )
+
+    @classmethod
+    def execute(cls, diffusion_form, diffusion_norm, last_step, last_step_size, s_noise) -> io.NodeOutput:
+        last_step_val = None if last_step == "None" else last_step
+        sampler = comfy.samplers.KSAMPLER(
+            k_diffusion_sampling.sample_selfflow_sde,
+            extra_options={
+                "diffusion_form": diffusion_form,
+                "diffusion_norm": diffusion_norm,
+                "last_step": last_step_val,
+                "last_step_size": last_step_size,
+                "s_noise": s_noise,
+            }
+        )
+        return io.NodeOutput(sampler)
+
+    get_sampler = execute
+
 class CustomSamplersExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -1074,6 +1113,7 @@ class CustomSamplersExtension(ComfyExtension):
             SamplerER_SDE,
             SamplerSASolver,
             SamplerSEEDS2,
+            SamplerSelfFlowSDE,
             SplitSigmas,
             SplitSigmasDenoise,
             FlipSigmas,
@@ -1093,3 +1133,4 @@ class CustomSamplersExtension(ComfyExtension):
 
 async def comfy_entrypoint() -> CustomSamplersExtension:
     return CustomSamplersExtension()
+

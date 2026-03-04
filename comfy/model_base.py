@@ -115,7 +115,7 @@ def model_sampling(model_config, model_type):
         c = comfy.model_sampling.IMG_TO_IMG_FLOW
     elif model_type == ModelType.FLOW_SELF:
         c = comfy.model_sampling.CONST
-        s = comfy.model_sampling.ModelSamplingSelfFlow
+        s = comfy.model_sampling.ModelSamplingDiscreteFlow
 
     class ModelSampling(s, c):
         pass

@@ -1750,6 +1750,11 @@ class SelfFlow(supported_models_base.BASE):
         'context_dim': 2048,
     }
 
+    sampling_settings = {
+        "shift": 1.0,
+        "multiplier": 1.0,
+    }
+
     def __init__(self, unet_config):
         super().__init__(unet_config)
         self.latent_format = latent_formats.SDXL
