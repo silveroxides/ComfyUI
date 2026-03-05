@@ -1167,6 +1167,14 @@ class Anima(BaseModel):
                 if cross_attn.shape[1] < 512:
                     cross_attn = torch.nn.functional.pad(cross_attn, (0, 0, 0, 512 - cross_attn.shape[1]))
             out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
+
+        # Reference latents support (Flux2-style temporal concatenation)
+        ref_latents = kwargs.get("reference_latents", None)
+        if ref_latents is not None:
+            latents = []
+            for lat in ref_latents:
+                latents.append(self.process_latent_in(lat))
+            out['ref_latents'] = comfy.conds.CONDList(latents)
         return out
 
 class Lumina2(BaseModel):
