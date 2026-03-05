@@ -27,9 +27,9 @@ try:
     if args.enable_triton_backend:
         try:
             import triton
-            logging.info(f"Found triton package installed. Enabling comfy-kitchen triton backend.")
+            logging.info("Found triton %s. Enabling comfy-kitchen triton backend.", triton.__version__)
         except ImportError as e:
-            logging.error("Failed to import triton, Error: {e}, the comfy-kitchen triton backend will not be available.")
+            logging.error(f"Failed to import triton, Error: {e}, the comfy-kitchen triton backend will not be available.")
             ck.registry.disable("triton")
     else:
         ck.registry.disable("triton")
