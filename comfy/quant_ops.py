@@ -28,7 +28,7 @@ try:
             import triton
             logging.info(f"Found triton package installed. Enabling comfy-kitchen triton backend.")
         except ImportError as e:
-            logging.error("Failed to import triton, Error: {e}, the comfy-kitchen triton backend will not be available.")
+            logging.error(f"Failed to import triton, Error: {e}, the comfy-kitchen triton backend will not be available.")
             ck.registry.disable("triton")
     else:
         ck.registry.disable("triton")
