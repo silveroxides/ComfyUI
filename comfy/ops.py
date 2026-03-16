@@ -857,6 +857,22 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                             orig_shape=(self.out_features, self.in_features),
                         )
 
+                    elif self.quant_format == "mxfp8":
+                        # MXFP8: E8M0 block scales stored as uint8 in safetensors
+                        block_scale = self._load_scale_param(state_dict, prefix, "weight_scale", device, manually_loaded_keys,
+                                                             dtype=torch.uint8)
+
+                        if block_scale is None:
+                            raise ValueError(f"Missing MXFP8 block scales for layer {layer_name}")
+
+                        block_scale = block_scale.view(torch.float8_e8m0fnu)
+
+                        params = layout_cls.Params(
+                            scale=block_scale,
+                            orig_dtype=MixedPrecisionOps._compute_dtype,
+                            orig_shape=(self.out_features, self.in_features),
+                        )
+
                     elif self.quant_format == "nvfp4":
                         # NVFP4: tensor_scale (weight_scale_2) + block_scale (weight_scale)
                         tensor_scale = self._load_scale_param(state_dict, prefix, "weight_scale_2", device, manually_loaded_keys)
@@ -1006,12 +1022,15 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
 def pick_operations(weight_dtype, compute_dtype, load_device=None, disable_fast_fp8=False, fp8_optimizations=False, model_config=None):
     fp8_compute = comfy.model_management.supports_fp8_compute(load_device) # TODO: if we support more ops this needs to be more granular
     nvfp4_compute = comfy.model_management.supports_nvfp4_compute(load_device)
+    mxfp8_compute = comfy.model_management.supports_mxfp8_compute(load_device)
 
     if model_config and hasattr(model_config, 'quant_config') and model_config.quant_config:
         logging.info("Using mixed precision operations")
         disabled = set()
         if not nvfp4_compute:
             disabled.add("nvfp4")
+        if not mxfp8_compute:
+            disabled.add("mxfp8")
         if not fp8_compute:
             disabled.add("float8_e4m3fn")
             disabled.add("float8_e5m2")
