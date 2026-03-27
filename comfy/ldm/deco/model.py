@@ -48,6 +48,7 @@ class DeCoParams:
 class DeCo(nn.Module):
     def __init__(self, image_model=None, final_layer=True, dtype=None, device=None, operations=None, **kwargs):
         super().__init__()
+        self.dtype = dtype
         params = DeCoParams(**kwargs)
         self.params = params
         self.in_channels = params.in_channels
