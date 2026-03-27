@@ -18,7 +18,7 @@ class Gemma3_270MTokenizer(sd1_clip.SDTokenizer):
         special_tokens = {}
         super().__init__(tokenizer, pad_with_end=False, embedding_size=640,
                          embedding_key='gemma3_270m', tokenizer_class=SPieceTokenizer,
-                         has_end_token=False, pad_to_max_length=True,
+                         has_end_token=False, pad_to_max_length=False,
                          max_length=99999999, min_length=128,
                          tokenizer_args={"add_bos": True, "add_eos": False, "special_tokens": special_tokens},
                          tokenizer_data=tokenizer_data)
