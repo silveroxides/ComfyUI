@@ -299,6 +299,31 @@ class Gemma2_2B_Config:
     stop_tokens = [1]
 
 @dataclass
+class Gemma3_270M_Config:
+    vocab_size: int = 262144
+    hidden_size: int = 640
+    intermediate_size: int = 2048
+    num_hidden_layers: int = 18
+    num_attention_heads: int = 4
+    num_key_value_heads: int = 1
+    max_position_embeddings: int = 32768
+    rms_norm_eps: float = 1e-6
+    rope_theta = [1000000.0, 10000.0]
+    transformer_type: str = "gemma3"
+    head_dim = 256
+    rms_norm_add = True
+    mlp_activation = "gelu_pytorch_tanh"
+    qkv_bias = False
+    rope_dims = None
+    q_norm = "gemma3"
+    k_norm = "gemma3"
+    sliding_attention = [512, 512, 512, 512, 512, False]
+    rope_scale = None
+    final_norm: bool = True
+    lm_head: bool = False
+    stop_tokens = [1]
+
+@dataclass
 class Gemma3_4B_Config:
     vocab_size: int = 262208
     hidden_size: int = 2560
@@ -1075,6 +1100,15 @@ class Gemma2_2B(BaseLlama, BaseGenerate, torch.nn.Module):
     def __init__(self, config_dict, dtype, device, operations):
         super().__init__()
         config = Gemma2_2B_Config(**config_dict)
+        self.num_layers = config.num_hidden_layers
+
+        self.model = Llama2_(config, device=device, dtype=dtype, ops=operations)
+        self.dtype = dtype
+
+class Gemma3_270M(BaseLlama, BaseGenerate, torch.nn.Module):
+    def __init__(self, config_dict, dtype, device, operations):
+        super().__init__()
+        config = Gemma3_270M_Config(**config_dict)
         self.num_layers = config.num_hidden_layers
 
         self.model = Llama2_(config, device=device, dtype=dtype, ops=operations)

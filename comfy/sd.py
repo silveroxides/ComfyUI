@@ -19,6 +19,7 @@ import comfy.ldm.hunyuan3d.vae
 import comfy.ldm.ace.vae.music_dcae_pipeline
 import comfy.ldm.hunyuan_video.vae
 import comfy.ldm.mmaudio.vae.autoencoder
+import comfy.ldm.deco.vae
 import comfy.pixel_space_convert
 import comfy.weight_adapter
 import yaml
@@ -509,6 +510,15 @@ class VAE:
                 self.first_stage_model = StageC_coder()
                 self.downscale_ratio = 32
                 self.latent_channels = 16
+            elif "semantic_encoder.in_proj.weight" in sd:  # PSVAE (DeCo / Nanosaur)
+                latent_dim = sd["semantic_encoder.in_proj.weight"].shape[0]  # 96
+                self.first_stage_model = comfy.ldm.deco.vae.PSVAE(latent_dim=latent_dim)
+                self.latent_channels = latent_dim
+                self.downscale_ratio = 16
+                self.upscale_ratio = 16
+                self.memory_used_encode = lambda shape, dtype: (1500 * shape[2] * shape[3]) * model_management.dtype_size(dtype)
+                self.memory_used_decode = lambda shape, dtype: (2500 * shape[2] * shape[3] * 16 * 16) * model_management.dtype_size(dtype)
+                self.working_dtypes = [torch.bfloat16, torch.float32]
             elif "decoder.conv_in.weight" in sd:
                 if sd['decoder.conv_in.weight'].shape[1] == 64:
                     ddconfig = {"block_out_channels": [128, 256, 512, 512, 1024, 1024], "in_channels": 3, "out_channels": 3, "num_res_blocks": 2, "ffactor_spatial": 32, "downsample_match_channel": True, "upsample_match_channel": True}

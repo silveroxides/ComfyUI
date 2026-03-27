@@ -52,6 +52,7 @@ import comfy.ldm.qwen_image.model
 import comfy.ldm.kandinsky5.model
 import comfy.ldm.anima.model
 import comfy.ldm.ace.ace_step15
+import comfy.ldm.deco.model
 
 import comfy.model_management
 import comfy.patcher_extension
@@ -845,6 +846,17 @@ class PixArt(BaseModel):
             out["c_size"] = comfy.conds.CONDRegular(torch.FloatTensor([[height, width]]))
             out["c_ar"] = comfy.conds.CONDRegular(torch.FloatTensor([[kwargs.get("aspect_ratio", height/width)]]))
 
+        return out
+
+class DeCo(BaseModel):
+    def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.deco.model.DeCo)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        cross_attn = kwargs.get("cross_attn", None)
+        if cross_attn is not None:
+            out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
         return out
 
 class Flux(BaseModel):

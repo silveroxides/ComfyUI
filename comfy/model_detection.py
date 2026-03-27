@@ -698,6 +698,45 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         dit_config["audio_model"] = "ace1.5"
         return dit_config
 
+    if '{}s_embedder.proj.weight'.format(key_prefix) in state_dict_keys and '{}text_refine_blocks.0.attn.qkv.weight'.format(key_prefix) in state_dict_keys: #DeCo
+        dit_config = {}
+        dit_config["image_model"] = "deco"
+
+        # hidden_size from s_embedder output dim
+        s_emb_w = state_dict['{}s_embedder.proj.weight'.format(key_prefix)]
+        dit_config["hidden_size"] = s_emb_w.shape[0]  # 1536
+
+        # in_channels: s_embedder input = in_channels * patch_size^2
+        s_emb_in = s_emb_w.shape[1]  # 96 when patch_size=1
+
+        # num_groups from head_dim
+        head_dim = state_dict['{}blocks.0.attn.q_norm.weight'.format(key_prefix)].shape[0]
+        dit_config["num_groups"] = dit_config["hidden_size"] // head_dim
+
+        # decoder_hidden_size from dec_net
+        dit_config["decoder_hidden_size"] = state_dict['{}dec_net.input_proj.weight'.format(key_prefix)].shape[0]  # 2048
+
+        # patch_size: cond_embed output = patch_size^2 * decoder_hidden_size
+        cond_embed_out = state_dict['{}dec_net.cond_embed.weight'.format(key_prefix)].shape[0]
+        patch_size_sq = cond_embed_out // dit_config["decoder_hidden_size"]
+        dit_config["patch_size"] = round(patch_size_sq ** 0.5)  # 1
+
+        # in_channels
+        dit_config["in_channels"] = s_emb_in // (dit_config["patch_size"] ** 2)  # 96
+
+        # block counts
+        dit_config["num_encoder_blocks"] = count_blocks(state_dict_keys, '{}blocks.'.format(key_prefix) + '{}.')
+        dit_config["num_decoder_blocks"] = count_blocks(state_dict_keys, '{}dec_net.res_blocks.'.format(key_prefix) + '{}.')
+        dit_config["num_text_blocks"] = count_blocks(state_dict_keys, '{}text_refine_blocks.'.format(key_prefix) + '{}.')
+
+        # txt_embed_dim from y_embedder
+        dit_config["txt_embed_dim"] = state_dict['{}y_embedder.proj.weight'.format(key_prefix)].shape[1]  # 640
+
+        # experiment flags
+        dit_config["experiment"] = "local_context" if '{}local_context.lambdas'.format(key_prefix) in state_dict_keys else ""
+
+        return dit_config
+
     if '{}input_blocks.0.0.weight'.format(key_prefix) not in state_dict_keys:
         return None
 

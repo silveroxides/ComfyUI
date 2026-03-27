@@ -783,3 +783,17 @@ class ZImagePixelSpace(ChromaRadiance):
     No VAE encoding/decoding — the model operates directly on RGB pixels.
     """
     pass
+
+class DeCo(LatentFormat):
+    latent_channels = 96
+    spacial_downscale_ratio = 16
+
+    def __init__(self):
+        self.scale_factor = 1.0 / 2.3623
+        self.shift_factor = -0.0179
+
+    def process_in(self, latent):
+        return (latent - self.shift_factor) * self.scale_factor
+
+    def process_out(self, latent):
+        return (latent / self.scale_factor) + self.shift_factor
