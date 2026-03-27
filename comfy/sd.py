@@ -63,6 +63,7 @@ import comfy.text_encoders.anima
 import comfy.text_encoders.ace15
 import comfy.text_encoders.longcat_image
 import comfy.text_encoders.qwen35
+import comfy.text_encoders.deco
 
 import comfy.model_patcher
 import comfy.lora
@@ -1244,6 +1245,7 @@ class TEModel(Enum):
     QWEN35_4B = 25
     QWEN35_9B = 26
     QWEN35_27B = 27
+    GEMMA_3_270M = 28
 
 
 def detect_te_model(sd):
@@ -1275,6 +1277,9 @@ def detect_te_model(sd):
             if 'vision_model.embeddings.patch_embedding.weight' in sd:
                 return TEModel.GEMMA_3_4B_VISION
             else:
+                weight = sd['model.layers.0.post_feedforward_layernorm.weight']
+                if weight.shape[0] <= 640:
+                    return TEModel.GEMMA_3_270M
                 return TEModel.GEMMA_3_4B
         return TEModel.GEMMA_2_2B
     if 'model.layers.0.self_attn.k_proj.bias' in sd:
@@ -1409,6 +1414,10 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
         elif te_model == TEModel.GEMMA_2_2B:
             clip_target.clip = comfy.text_encoders.lumina2.te(**llama_detect(clip_data))
             clip_target.tokenizer = comfy.text_encoders.lumina2.LuminaTokenizer
+            tokenizer_data["spiece_model"] = clip_data[0].get("spiece_model", None)
+        elif te_model == TEModel.GEMMA_3_270M:
+            clip_target.clip = comfy.text_encoders.deco.te(**comfy.text_encoders.deco.gemma3_270m_detect(clip_data[0]))
+            clip_target.tokenizer = comfy.text_encoders.deco.DeCoTokenizer
             tokenizer_data["spiece_model"] = clip_data[0].get("spiece_model", None)
         elif te_model == TEModel.GEMMA_3_4B:
             clip_target.clip = comfy.text_encoders.lumina2.te(**llama_detect(clip_data), model_type="gemma3_4b")
