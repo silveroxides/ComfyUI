@@ -12,7 +12,6 @@ from .layers import (
     Embed,
     NerfEmbedder,
     TimestepEmbedder,
-    Norm,
     FlattenDiTBlock,
     TextRefineBlock,
     SimpleMLPAdaLN,
@@ -92,7 +91,7 @@ class DeCo(nn.Module):
                                        dtype=dtype, device=device, operations=operations)
         self.t_embedder = TimestepEmbedder(self.hidden_size,
                                            dtype=dtype, device=device, operations=operations)
-        self.y_embedder = Embed(self.txt_embed_dim, self.hidden_size, bias=True, norm_layer=Norm,
+        self.y_embedder = Embed(self.txt_embed_dim, self.hidden_size, bias=True, norm_layer=operations.RMSNorm,
                                 dtype=dtype, device=device, operations=operations)
 
         self.shared_encoder_adaLN = nn.Sequential(
@@ -171,7 +170,7 @@ class DeCo(nn.Module):
 
         xpos = self.fetch_pos(H // self.patch_size, W // self.patch_size, x.device)
 
-        t = self.t_embedder(t.view(-1)).view(B, -1, self.hidden_size)
+        t = self.t_embedder(t.view(-1), dtype=embed_dtype).view(B, -1, self.hidden_size)
         condition = torch.nn.functional.silu(t)
         y_emb = y_emb.to(dtype=t.dtype)
 

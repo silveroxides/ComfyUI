@@ -8,19 +8,6 @@ from typing import Tuple
 from comfy.ldm.modules.attention import optimized_attention
 
 
-class Norm(nn.Module):
-    """RMSNorm with learnable weight."""
-    def __init__(self, hidden_size, eps=1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return (self.weight * hidden_states).to(input_dtype)
 
 
 class FeedForward(nn.Module):
@@ -41,7 +28,7 @@ class Embed(nn.Module):
         self.in_chans = in_chans
         self.embed_dim = embed_dim
         self.proj = operations.Linear(in_chans, embed_dim, bias=bias, dtype=dtype, device=device)
-        self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
+        self.norm = norm_layer(embed_dim, device=device, dtype=dtype) if norm_layer else nn.Identity()
 
     def forward(self, x):
         x = self.proj(x)
@@ -72,8 +59,8 @@ class TimestepEmbedder(nn.Module):
             embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
         return embedding
 
-    def forward(self, t):
-        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
+    def forward(self, t, dtype, **kwargs):
+        t_freq = self.timestep_embedding(t, self.frequency_embedding_size).to(dtype)
         t_emb = self.mlp(t_freq)
         return t_emb
 
@@ -181,8 +168,8 @@ class Attention(nn.Module):
         if use_cross_attention:
             self.kv_y = operations.Linear(dim, dim * 2, bias=qkv_bias, dtype=dtype, device=device)
 
-        self.q_norm = Norm(self.head_dim)
-        self.k_norm = Norm(self.head_dim)
+        self.q_norm = operations.RMSNorm(self.head_dim, eps=1e-6, device=device, dtype=dtype)
+        self.k_norm = operations.RMSNorm(self.head_dim, eps=1e-6, device=device, dtype=dtype)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = operations.Linear(dim, dim, dtype=dtype, device=device)
         self.proj_drop = nn.Dropout(proj_drop)
@@ -229,10 +216,10 @@ class FlattenDiTBlock(nn.Module):
     def __init__(self, hidden_size, groups, mlp_ratio=4, is_encoder_block=False, use_cross_attention=True,
                  dtype=None, device=None, operations=None):
         super().__init__()
-        self.norm1 = Norm(hidden_size, eps=1e-6)
+        self.norm1 = operations.RMSNorm(hidden_size, eps=1e-6, device=device, dtype=dtype)
         self.attn = Attention(hidden_size, num_heads=groups, qkv_bias=False, use_cross_attention=use_cross_attention,
                               dtype=dtype, device=device, operations=operations)
-        self.norm2 = Norm(hidden_size, eps=1e-6)
+        self.norm2 = operations.RMSNorm(hidden_size, eps=1e-6, device=device, dtype=dtype)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.mlp = FeedForward(hidden_size, mlp_hidden_dim, dtype=dtype, device=device, operations=operations)
         self.is_encoder_block = is_encoder_block
@@ -339,8 +326,8 @@ class TextRefineAttention(nn.Module):
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5
         self.qkv = operations.Linear(dim, dim * 3, bias=qkv_bias, dtype=dtype, device=device)
-        self.q_norm = Norm(self.head_dim)
-        self.k_norm = Norm(self.head_dim)
+        self.q_norm = operations.RMSNorm(self.head_dim, eps=1e-6, device=device, dtype=dtype)
+        self.k_norm = operations.RMSNorm(self.head_dim, eps=1e-6, device=device, dtype=dtype)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = operations.Linear(dim, dim, dtype=dtype, device=device)
         self.proj_drop = nn.Dropout(proj_drop)
@@ -366,10 +353,10 @@ class TextRefineBlock(nn.Module):
     def __init__(self, hidden_size, groups, mlp_ratio=4,
                  dtype=None, device=None, operations=None):
         super().__init__()
-        self.norm1 = Norm(hidden_size, eps=1e-6)
+        self.norm1 = operations.RMSNorm(hidden_size, eps=1e-6, device=device, dtype=dtype)
         self.attn = TextRefineAttention(hidden_size, num_heads=groups, qkv_bias=False,
                                         dtype=dtype, device=device, operations=operations)
-        self.norm2 = Norm(hidden_size, eps=1e-6)
+        self.norm2 = operations.RMSNorm(hidden_size, eps=1e-6, device=device, dtype=dtype)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.mlp = FeedForward(hidden_size, mlp_hidden_dim, dtype=dtype, device=device, operations=operations)
 
