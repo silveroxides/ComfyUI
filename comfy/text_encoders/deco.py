@@ -1,12 +1,20 @@
+import os
 import comfy.text_encoders.llama
 from comfy import sd1_clip
 from .spiece_tokenizer import SPieceTokenizer
 import comfy.utils
 
+GEMMA_TOKENIZER_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "gemma_tokenizer")
+
 
 class Gemma3_270MTokenizer(sd1_clip.SDTokenizer):
     def __init__(self, embedding_directory=None, tokenizer_data={}):
         tokenizer = tokenizer_data.get("spiece_model", None)
+        if tokenizer is None:
+            # Fall back to file-based tokenizer if bytes not embedded in safetensors
+            tokenizer_path = os.path.join(GEMMA_TOKENIZER_DIR, "tokenizer.model")
+            if os.path.isfile(tokenizer_path):
+                tokenizer = tokenizer_path
         special_tokens = {}
         super().__init__(tokenizer, pad_with_end=False, embedding_size=640,
                          embedding_key='gemma3_270m', tokenizer_class=SPieceTokenizer,
