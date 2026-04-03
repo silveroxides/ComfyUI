@@ -1,5 +1,6 @@
 import torch
 import logging
+from typing import Callable, NamedTuple, Optional
 
 try:
     import comfy_kitchen as ck
@@ -177,32 +178,76 @@ register_layout_class("TensorCoreNVFP4Layout", TensorCoreNVFP4Layout)
 if _CK_MXFP8_AVAILABLE:
     register_layout_class("TensorCoreMXFP8Layout", TensorCoreMXFP8Layout)
 
-QUANT_ALGOS = {
-    "float8_e4m3fn": {
-        "storage_t": torch.float8_e4m3fn,
-        "parameters": {"weight_scale", "input_scale"},
-        "comfy_tensor_layout": "TensorCoreFP8E4M3Layout",
-    },
-    "float8_e5m2": {
-        "storage_t": torch.float8_e5m2,
-        "parameters": {"weight_scale", "input_scale"},
-        "comfy_tensor_layout": "TensorCoreFP8E5M2Layout",
-    },
-    "nvfp4": {
-        "storage_t": torch.uint8,
-        "parameters": {"weight_scale", "weight_scale_2", "input_scale"},
-        "comfy_tensor_layout": "TensorCoreNVFP4Layout",
-        "group_size": 16,
-    },
+class QuantHandler(NamedTuple):
+    layout_class: type
+    storage_t: torch.dtype
+    parameters: set
+    comfy_tensor_layout: str
+    group_size: Optional[int] = None
+    # Optional custom layout registration function.
+    # Defaults to comfy_kitchen's register_layout_class when None.
+    register_fn: Optional[Callable] = None
+    # Optional callable to build layout params from state dict.
+    # Required for custom formats to load in ops.py.
+    # Signature: (layout_cls, state_dict, prefix, device,
+    #             manually_loaded_keys, compute_dtype,
+    #             out_features, in_features, load_scale_fn) -> params
+    build_params: Optional[Callable] = None
+
+QUANT_HANDLERS = {
+    "float8_e4m3fn": QuantHandler(
+        layout_class=TensorCoreFP8E4M3Layout,
+        storage_t=torch.float8_e4m3fn,
+        parameters={"weight_scale", "input_scale"},
+        comfy_tensor_layout="TensorCoreFP8E4M3Layout",
+    ),
+    "float8_e5m2": QuantHandler(
+        layout_class=TensorCoreFP8E5M2Layout,
+        storage_t=torch.float8_e5m2,
+        parameters={"weight_scale", "input_scale"},
+        comfy_tensor_layout="TensorCoreFP8E5M2Layout",
+    ),
+    "nvfp4": QuantHandler(
+        layout_class=TensorCoreNVFP4Layout,
+        storage_t=torch.uint8,
+        parameters={"weight_scale", "weight_scale_2", "input_scale"},
+        comfy_tensor_layout="TensorCoreNVFP4Layout",
+        group_size=16,
+    ),
 }
 
 if _CK_MXFP8_AVAILABLE:
-    QUANT_ALGOS["mxfp8"] = {
-        "storage_t": torch.float8_e4m3fn,
-        "parameters": {"weight_scale", "input_scale"},
-        "comfy_tensor_layout": "TensorCoreMXFP8Layout",
-        "group_size": 32,
+    QUANT_HANDLERS["mxfp8"] = QuantHandler(
+        layout_class=TensorCoreMXFP8Layout,
+        storage_t=torch.float8_e4m3fn,
+        parameters={"weight_scale", "input_scale"},
+        comfy_tensor_layout="TensorCoreMXFP8Layout",
+        group_size=32,
+    )
+
+
+def _quant_handler_to_algo(handler):
+    algo = {
+        "storage_t": handler.storage_t,
+        "parameters": handler.parameters,
+        "comfy_tensor_layout": handler.comfy_tensor_layout,
     }
+    if handler.group_size is not None:
+        algo["group_size"] = handler.group_size
+    return algo
+
+
+def register_quant_handler(name, handler):
+    QUANT_HANDLERS[name] = handler
+    fn = handler.register_fn if handler.register_fn is not None else register_layout_class
+    fn(handler.comfy_tensor_layout, handler.layout_class)
+    QUANT_ALGOS[name] = _quant_handler_to_algo(handler)
+    QUANT_ALGO_NAMES.clear()
+    QUANT_ALGO_NAMES.extend(QUANT_HANDLERS)
+
+
+QUANT_ALGOS = {name: _quant_handler_to_algo(h) for name, h in QUANT_HANDLERS.items()}
+QUANT_ALGO_NAMES = list(QUANT_HANDLERS)
 
 
 # ==============================================================================
@@ -216,6 +261,10 @@ __all__ = [
     "TensorCoreFP8E4M3Layout",
     "TensorCoreFP8E5M2Layout",
     "TensorCoreNVFP4Layout",
+    "QuantHandler",
+    "QUANT_HANDLERS",
     "QUANT_ALGOS",
+    "QUANT_ALGO_NAMES",
+    "register_quant_handler",
     "register_layout_op",
 ]

@@ -771,6 +771,7 @@ if CUBLAS_IS_AVAILABLE:
 from .quant_ops import (
     QuantizedTensor,
     QUANT_ALGOS,
+    QUANT_HANDLERS,
     TensorCoreFP8Layout,
     get_layout_class,
 )
@@ -996,6 +997,13 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                             block_scale=block_scale,
                             orig_dtype=MixedPrecisionOps._compute_dtype,
                             orig_shape=(self.out_features, self.in_features),
+                        )
+                    elif self.quant_format in QUANT_HANDLERS and QUANT_HANDLERS[self.quant_format].build_params is not None:
+                        params = QUANT_HANDLERS[self.quant_format].build_params(
+                            layout_cls, state_dict, prefix, device,
+                            manually_loaded_keys, MixedPrecisionOps._compute_dtype,
+                            self.out_features, self.in_features,
+                            self._load_scale_param,
                         )
                     else:
                         raise ValueError(f"Unsupported quantization format: {self.quant_format}")
