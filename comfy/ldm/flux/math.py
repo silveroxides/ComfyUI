@@ -1,6 +1,7 @@
 import torch
 from einops import rearrange
 from torch import Tensor
+
 from comfy.ldm.modules.attention import optimized_attention
 import comfy.model_management
 import logging
