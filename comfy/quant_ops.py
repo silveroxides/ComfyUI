@@ -3,7 +3,6 @@ import logging
 
 from comfy.cli_args import args
 
-
 try:
     import comfy_kitchen as ck
     from comfy_kitchen.tensor import (
