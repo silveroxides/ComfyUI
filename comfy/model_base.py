@@ -21,6 +21,7 @@ import comfy.ldm.hunyuan3dv2_1.hunyuandit
 import torch
 import logging
 import comfy.ldm.lightricks.av_model
+import comfy.context_windows
 from comfy.ldm.modules.diffusionmodules.openaimodel import UNetModel, Timestep
 from comfy.ldm.cascade.stage_c import StageC
 from comfy.ldm.cascade.stage_b import StageB
@@ -51,6 +52,7 @@ import comfy.ldm.qwen_image.model
 import comfy.ldm.kandinsky5.model
 import comfy.ldm.anima.model
 import comfy.ldm.ace.ace_step15
+import comfy.ldm.rt_detr.rtdetr_v4
 
 import comfy.model_management
 import comfy.patcher_extension
@@ -889,7 +891,7 @@ class Flux(BaseModel):
         return torch.cat((image, mask), dim=1)
 
     def encode_adm(self, **kwargs):
-        return kwargs["pooled_output"]
+        return kwargs.get("pooled_output", None)
 
     def extra_conds(self, **kwargs):
         out = super().extra_conds(**kwargs)
@@ -936,9 +938,10 @@ class LongCatImage(Flux):
         transformer_options = transformer_options.copy()
         rope_opts = transformer_options.get("rope_options", {})
         rope_opts = dict(rope_opts)
+        pe_len = float(c_crossattn.shape[1]) if c_crossattn is not None else 512.0
         rope_opts.setdefault("shift_t", 1.0)
-        rope_opts.setdefault("shift_y", 512.0)
-        rope_opts.setdefault("shift_x", 512.0)
+        rope_opts.setdefault("shift_y", pe_len)
+        rope_opts.setdefault("shift_x", pe_len)
         transformer_options["rope_options"] = rope_opts
         return super()._apply_model(x, t, c_concat, c_crossattn, control, transformer_options, **kwargs)
 
@@ -1058,6 +1061,10 @@ class LTXAV(BaseModel):
         guide_attention_entries = kwargs.get("guide_attention_entries", None)
         if guide_attention_entries is not None:
             out['guide_attention_entries'] = comfy.conds.CONDConstant(guide_attention_entries)
+
+        ref_audio = kwargs.get("ref_audio", None)
+        if ref_audio is not None:
+            out['ref_audio'] = comfy.conds.CONDConstant(ref_audio)
 
         return out
 
@@ -1383,7 +1390,6 @@ class WAN21_Vace(WAN21):
 
     def resize_cond_for_context_window(self, cond_key, cond_value, window, x_in, device, retain_index_list=[]):
         if cond_key == "vace_context":
-            import comfy.context_windows
             return comfy.context_windows.slice_cond(cond_value, window, x_in, device, temporal_dim=3, retain_index_list=retain_index_list)
         return super().resize_cond_for_context_window(cond_key, cond_value, window, x_in, device, retain_index_list=retain_index_list)
 
@@ -1441,7 +1447,6 @@ class WAN21_HuMo(WAN21):
 
     def resize_cond_for_context_window(self, cond_key, cond_value, window, x_in, device, retain_index_list=[]):
         if cond_key == "audio_embed":
-            import comfy.context_windows
             return comfy.context_windows.slice_cond(cond_value, window, x_in, device, temporal_dim=1)
         return super().resize_cond_for_context_window(cond_key, cond_value, window, x_in, device, retain_index_list=retain_index_list)
 
@@ -1463,7 +1468,6 @@ class WAN22_Animate(WAN21):
         return out
 
     def resize_cond_for_context_window(self, cond_key, cond_value, window, x_in, device, retain_index_list=[]):
-        import comfy.context_windows
         if cond_key == "face_pixel_values":
             return comfy.context_windows.slice_cond(cond_value, window, x_in, device, temporal_dim=2, temporal_scale=4, temporal_offset=1)
         if cond_key == "pose_latents":
@@ -1508,7 +1512,6 @@ class WAN22_S2V(WAN21):
 
     def resize_cond_for_context_window(self, cond_key, cond_value, window, x_in, device, retain_index_list=[]):
         if cond_key == "audio_embed":
-            import comfy.context_windows
             return comfy.context_windows.slice_cond(cond_value, window, x_in, device, temporal_dim=1)
         return super().resize_cond_for_context_window(cond_key, cond_value, window, x_in, device, retain_index_list=retain_index_list)
 
@@ -1955,3 +1958,7 @@ class Kandinsky5Image(Kandinsky5):
 
     def concat_cond(self, **kwargs):
         return None
+
+class RT_DETR_v4(BaseModel):
+    def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.rt_detr.rtdetr_v4.RTv4)
