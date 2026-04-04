@@ -1134,7 +1134,6 @@ class VAE:
             return None
 
 
-
 class StyleModel:
     def __init__(self, model, device="cpu"):
         self.model = model

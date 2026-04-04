@@ -769,7 +769,6 @@ class Flux2(Flux):
     unet_extra_config = {}
     latent_format = latent_formats.Flux2
 
-
     supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]
 
     vae_key_prefix = ["vae."]
