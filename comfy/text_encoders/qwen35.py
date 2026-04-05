@@ -661,7 +661,7 @@ class Qwen35VisionModel(nn.Module):
         cos = emb.cos().unsqueeze(-2)
         sin = emb.sin().unsqueeze(-2)
         sin_half = sin.shape[-1] // 2
-        position_embeddings = (cos, sin[..., :sin_half], -sin[..., sin_half:])
+        position_embeddings = (cos.to(x.device), sin[..., :sin_half].to(x.device), -sin[..., sin_half:].to(x.device))
         cu_seqlens = torch.repeat_interleave(
             grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
         ).cumsum(dim=0, dtype=torch.int32)

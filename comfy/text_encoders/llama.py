@@ -411,9 +411,9 @@ def precompute_freqs_cis(head_dim, position_ids, theta, rope_scale=None, rope_di
 
 def apply_rope(xq, xk, freqs_cis):
     org_dtype = xq.dtype
-    cos = freqs_cis[0]
-    sin = freqs_cis[1]
-    nsin = freqs_cis[2]
+    cos = freqs_cis[0].to(xq.device)
+    sin = freqs_cis[1].to(xq.device)
+    nsin = freqs_cis[2].to(xq.device)
 
     q_embed = (xq * cos)
     q_split = q_embed.shape[-1] // 2
