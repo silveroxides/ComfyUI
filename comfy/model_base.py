@@ -1221,6 +1221,13 @@ class Anima(BaseModel):
                     out['t5xxl_weights'] = comfy.conds.CONDRegular(t5xxl_weights)
 
             out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
+
+        ref_latents = kwargs.get("reference_latents", None)
+        if ref_latents is not None:
+            latents = []
+            for lat in ref_latents:
+                latents.append(self.process_latent_in(lat))
+            out['ref_latents'] = comfy.conds.CONDList(latents)
         return out
 
 class Lumina2(BaseModel):
