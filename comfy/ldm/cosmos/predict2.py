@@ -841,11 +841,21 @@ class MiniTrainDIT(nn.Module):
         orig_shape = list(x.shape)
 
         ref_latents = kwargs.get('ref_latents', None)
+        ref_num_tokens = []
         if ref_latents is not None:
             for ref in ref_latents:
                 if ref.ndim == 4:
                     ref = ref.unsqueeze(2)
-                x = torch.cat([x, ref.to(dtype=x.dtype, device=x.device)], dim=2)
+                ref = ref.to(dtype=x.dtype, device=x.device)
+                ref_t_patches = ref.shape[2] // self.patch_temporal
+                ref_h_patches = ref.shape[3] // self.patch_spatial
+                ref_w_patches = ref.shape[4] // self.patch_spatial
+                ref_num_tokens.append(ref_t_patches * ref_h_patches * ref_w_patches)
+                x = torch.cat([x, ref], dim=2)
+            transformer_options = dict(kwargs.get('transformer_options', {}))
+            transformer_options['reference_image_num_tokens'] = ref_num_tokens
+            kwargs = dict(kwargs)
+            kwargs['transformer_options'] = transformer_options
 
         x = comfy.ldm.common_dit.pad_to_patch_size(x, (self.patch_temporal, self.patch_spatial, self.patch_spatial))
         x_B_C_T_H_W = x
