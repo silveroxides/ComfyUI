@@ -349,12 +349,27 @@ class Anima(MiniTrainDIT):
         t_embedding_B_T_D, adaln_lora_B_T_3D = self.t_embedder[1](self.t_embedder[0](timesteps_B_T).to(all_embedded.dtype))
         t_embedding_B_T_D = self.t_embedding_norm(t_embedding_B_T_D)
 
-        # expand t_embedding to cover all T positions (gen + refs all share same timestep)
         T_total = all_embedded.shape[1]
-        if t_embedding_B_T_D.shape[1] == 1:
-            t_embedding_B_T_D = t_embedding_B_T_D.expand(-1, T_total, -1)
-        if adaln_lora_B_T_3D is not None and adaln_lora_B_T_3D.shape[1] == 1:
-            adaln_lora_B_T_3D = adaln_lora_B_T_3D.expand(-1, T_total, -1)
+        T_ref_total = T_total - T_gp
+
+        if ref_method == 'index_timestep_zero' and T_ref_total > 0:
+            # ref frames see zero-noise timestep: compute embedding at sigma=0
+            zero_ts = torch.zeros_like(timesteps_B_T)
+            t_emb_zero, adaln_zero = self.t_embedder[1](self.t_embedder[0](zero_ts).to(all_embedded.dtype))
+            t_emb_zero = self.t_embedding_norm(t_emb_zero)
+            # expand gen embedding to T_gp, zero embedding to T_ref_total, then cat
+            t_gen = t_embedding_B_T_D.expand(-1, T_gp, -1)
+            t_ref = t_emb_zero.expand(-1, T_ref_total, -1)
+            t_embedding_B_T_D = torch.cat([t_gen, t_ref], dim=1)
+            if adaln_lora_B_T_3D is not None:
+                adaln_ref = adaln_zero.expand(-1, T_ref_total, -1) if adaln_zero is not None else torch.zeros(B, T_ref_total, adaln_lora_B_T_3D.shape[-1], dtype=adaln_lora_B_T_3D.dtype, device=adaln_lora_B_T_3D.device)
+                adaln_lora_B_T_3D = torch.cat([adaln_lora_B_T_3D.expand(-1, T_gp, -1), adaln_ref], dim=1)
+        else:
+            # all T positions share the same timestep embedding
+            if t_embedding_B_T_D.shape[1] == 1:
+                t_embedding_B_T_D = t_embedding_B_T_D.expand(-1, T_total, -1)
+            if adaln_lora_B_T_3D is not None and adaln_lora_B_T_3D.shape[1] == 1:
+                adaln_lora_B_T_3D = adaln_lora_B_T_3D.expand(-1, T_total, -1)
 
         # --- transformer_options ---
         transformer_options = dict(kwargs.get('transformer_options', {}))
