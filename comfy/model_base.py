@@ -1229,13 +1229,17 @@ class Anima(BaseModel):
             for lat in ref_latents:
                 latents.append(self.process_latent_in(lat))
             out['ref_latents'] = comfy.conds.CONDList(latents)
+
+            ref_latents_method = kwargs.get("reference_latents_method", None)
+            if ref_latents_method is not None:
+                out['ref_latents_method'] = comfy.conds.CONDConstant(ref_latents_method)
         return out
 
     def extra_conds_shapes(self, **kwargs):
         out = {}
         ref_latents = kwargs.get("reference_latents", None)
         if ref_latents is not None:
-            out['ref_latents'] = [1, 16, sum(math.prod(lat.size()[2:]) for lat in ref_latents)]
+            out['ref_latents'] = list([1, 16, sum(map(lambda a: math.prod(a.size()[2:]), ref_latents))])
         return out
 
 class Lumina2(BaseModel):
