@@ -672,6 +672,50 @@ class Qwen35VisionModel(nn.Module):
         merged = self.merger(x)
         return merged
 
+# TODO: expose as Node option or configuration class
+QWEN35_MTP_DRAFT_DEPTH = 3
+
+
+# Qwen3.5 Multi-Token Predictor (matches vLLM qwen3_5_mtp.py structure)
+class Qwen35MTPPredictor(nn.Module):
+    def __init__(self, config, device=None, dtype=None, ops=None):
+        super().__init__()
+        self.num_mtp_layers = getattr(config, "mtp_num_hidden_layers", 1)
+        self.hidden_size = config.hidden_size
+
+        self.pre_fc_norm_embedding = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
+        self.pre_fc_norm_hidden = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
+        self.fc = ops.Linear(config.hidden_size * 2, config.hidden_size, bias=False, device=device, dtype=dtype)
+
+        # MTP layers forced to full_attention regardless of base hybrid pattern
+        import copy as _copy
+        mtp_cfg = _copy.copy(config)
+        mtp_cfg.layer_types = ["full_attention"] * self.num_mtp_layers
+        self.layers = nn.ModuleList([
+            Qwen35TransformerBlock(mtp_cfg, index=i, device=device, dtype=dtype, ops=ops)
+            for i in range(self.num_mtp_layers)
+        ])
+
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
+
+    def forward(self, prev_hidden, inputs_embeds, freqs_cis=None, attention_mask=None, optimized_attention=None, past_key_value=None, spec_step_idx=0):
+        e = self.pre_fc_norm_embedding(inputs_embeds)
+        h = self.pre_fc_norm_hidden(prev_hidden)
+        x = torch.cat([e, h], dim=-1)
+        x = self.fc(x)
+
+        idx = spec_step_idx % self.num_mtp_layers
+        x, present_kv = self.layers[idx](
+            x=x,
+            attention_mask=attention_mask,
+            freqs_cis=freqs_cis,
+            optimized_attention=optimized_attention,
+            past_key_value=past_key_value,
+        )
+        x = self.norm(x)
+        return x, present_kv
+
+
 # Model Wrapper
 class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
     model_type = "qwen35_2b"
@@ -741,6 +785,224 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                     0
                 ))
         return past_key_values
+
+# Tokenizer and Text Encoder Wrappers
+
+class Qwen35_MTP(Qwen35):
+    model_type = "qwen35_2b"
+
+    def __init__(self, config_dict, dtype, device, operations):
+        super().__init__(config_dict, dtype, device, operations)
+        config = _make_config(self.model_type, config_dict)
+        self.mtp = Qwen35MTPPredictor(config, device=device, dtype=dtype, ops=operations)
+
+    def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
+        past_key_values = super().init_kv_cache(batch, max_cache_len, device, execution_dtype)
+        model_config = self.model.config
+        num_mtp = getattr(model_config, "mtp_num_hidden_layers", 1)
+        mtp_kv = []
+        for _ in range(num_mtp):
+            mtp_kv.append((
+                torch.empty([batch, model_config.num_key_value_heads, max_cache_len, model_config.head_dim], device=device, dtype=execution_dtype),
+                torch.empty([batch, model_config.num_key_value_heads, max_cache_len, model_config.head_dim], device=device, dtype=execution_dtype),
+                0,
+            ))
+        return past_key_values, mtp_kv
+
+    def _clone_linear_states(self, past_key_values):
+        # Snapshot DeltaNet recurrent/conv state tensors before mutating verify pass
+        snapshot = []
+        for i, lt in enumerate(self.model.config.layer_types):
+            if lt == "linear_attention":
+                rec, conv, step = past_key_values[i]
+                snapshot.append((rec.clone(), conv.clone(), step))
+            else:
+                snapshot.append(None)
+        return snapshot
+
+    def _restore_linear_states(self, past_key_values, snapshot, full_attn_index):
+        # Restore DeltaNet state after rejection. Full-attn rollback via index only.
+        new_kv = []
+        for i, lt in enumerate(self.model.config.layer_types):
+            if lt == "linear_attention":
+                rec_s, conv_s, step_s = snapshot[i]
+                rec, conv, _ = past_key_values[i]
+                rec.copy_(rec_s)
+                conv.copy_(conv_s)
+                new_kv.append((rec, conv, step_s))
+            else:
+                pk, pv, _ = past_key_values[i]
+                new_kv.append((pk, pv, full_attn_index))
+        return new_kv
+
+    def _rollback_mtp_index(self, mtp_kv, index):
+        return [(pk, pv, index) for pk, pv, _ in mtp_kv]
+
+    def _mtp_forward(self, prev_hidden, inputs_embeds, mtp_past_kv, seq_len, spec_step_idx=0):
+        device = inputs_embeds.device
+        idx = spec_step_idx % len(mtp_past_kv)
+        past_len = mtp_past_kv[idx][2]
+        position_ids = torch.arange(past_len, past_len + seq_len, device=device).unsqueeze(0)
+        freqs_cis = self.model.compute_freqs_cis(position_ids, device)
+
+        mask = None
+        if seq_len > 1:
+            mask = torch.empty(past_len + seq_len, past_len + seq_len, dtype=inputs_embeds.dtype, device=device).fill_(torch.finfo(inputs_embeds.dtype).min / 4).triu_(1)
+
+        optimized_attention = optimized_attention_for_device(device, mask=mask is not None, small_input=True)
+
+        x, present_kv = self.mtp(
+            prev_hidden=prev_hidden,
+            inputs_embeds=inputs_embeds,
+            freqs_cis=freqs_cis,
+            attention_mask=mask,
+            optimized_attention=optimized_attention,
+            past_key_value=mtp_past_kv[idx],
+            spec_step_idx=spec_step_idx,
+        )
+        mtp_past_kv[idx] = present_kv
+        return x, mtp_past_kv
+
+    def _logits_from_hidden(self, x):
+        # Like BaseGenerate.logits but over all positions, not just last
+        if hasattr(self.model, "lm_head"):
+            module = self.model.lm_head
+        else:
+            module = self.model.embed_tokens
+
+        offload_stream = None
+        if module.comfy_cast_weights:
+            weight, _, offload_stream = comfy.ops.cast_bias_weight(module, x, offloadable=True)
+        else:
+            weight = self.model.embed_tokens.weight.to(x)
+
+        out = torch.nn.functional.linear(x, weight, None)
+        comfy.ops.uncast_bias_weight(module, weight, None, offload_stream)
+        return out
+
+    def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, initial_tokens=[], execution_dtype=None, min_tokens=0, presence_penalty=0.0):
+        k_draft = QWEN35_MTP_DRAFT_DEPTH
+        device = embeds.device
+
+        if stop_tokens is None:
+            stop_tokens = self.model.config.stop_tokens
+
+        if execution_dtype is None:
+            if comfy.model_management.should_use_bf16(device):
+                execution_dtype = torch.bfloat16
+            else:
+                execution_dtype = torch.float32
+        embeds = embeds.to(execution_dtype)
+
+        if embeds.ndim == 2:
+            embeds = embeds.unsqueeze(0)
+
+        max_cache_len = embeds.shape[1] + max_length
+        past_kv, mtp_kv = self.init_kv_cache(embeds.shape[0], max_cache_len, device, execution_dtype)
+
+        generator = torch.Generator(device=device).manual_seed(seed) if do_sample else None
+
+        generated_token_ids = []
+        pbar = comfy.utils.ProgressBar(max_length)
+
+        # Prefill base
+        x, _, past_kv = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_kv)
+        logits = self.logits(x)[:, -1]
+        next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
+        token_id = next_token[0].item()
+        generated_token_ids.append(token_id)
+        pbar.update(1)
+
+        if token_id in stop_tokens:
+            return generated_token_ids
+
+        # Prefill MTP over prompt to sync its kv cache
+        mtp_hidden, mtp_kv = self._mtp_forward(x, embeds, mtp_kv, seq_len=embeds.shape[1], spec_step_idx=0)
+        last_mtp_hidden = mtp_hidden[:, -1:]
+
+        while len(generated_token_ids) < max_length:
+            # Snapshot state for rollback
+            lin_snap = self._clone_linear_states(past_kv)
+            base_full_idx = self.model.get_past_len(past_kv)
+            mtp_idx = mtp_kv[0][2]
+
+            # 1. Draft k tokens via MTP
+            drafted = []
+            dh = last_mtp_hidden
+            de = self.model.embed_tokens(next_token).to(execution_dtype)
+            stop_hit_in_draft = False
+            for i in range(k_draft):
+                dh, mtp_kv = self._mtp_forward(dh, de, mtp_kv, seq_len=1, spec_step_idx=i)
+                d_logits = self._logits_from_hidden(dh)[:, -1]
+                d_tok = self.sample_token(d_logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids + [t.item() for t in drafted], generator, do_sample=do_sample, presence_penalty=presence_penalty)
+                drafted.append(d_tok[0, 0])
+                de = self.model.embed_tokens(d_tok).to(execution_dtype)
+                if d_tok[0].item() in stop_tokens:
+                    stop_hit_in_draft = True
+                    break
+
+            # 2. Verify: run base model on [next_token, drafted[0..k-2]]
+            #    Base output at pos i predicts token at pos i+1
+            verify_ids = [next_token] + [t.view(1, 1) for t in drafted[:-1]] if drafted else [next_token]
+            verify_tokens = torch.cat(verify_ids, dim=1)
+            verify_embeds = self.model.embed_tokens(verify_tokens).to(execution_dtype)
+            vx, _, past_kv = self.model.forward(None, embeds=verify_embeds, attention_mask=None, past_key_values=past_kv)
+            target_logits_all = self._logits_from_hidden(vx)
+
+            # 3. Accept
+            n_accepted = 0
+            bonus_stop = False
+            for i in range(len(drafted)):
+                t_tok = self.sample_token(target_logits_all[:, i], temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
+                if t_tok[0].item() == drafted[i].item():
+                    n_accepted += 1
+                    tid = t_tok[0].item()
+                    generated_token_ids.append(tid)
+                    pbar.update(1)
+                    if tid in stop_tokens:
+                        bonus_stop = True
+                        break
+                    if len(generated_token_ids) >= max_length:
+                        bonus_stop = True
+                        break
+                else:
+                    break
+
+            if bonus_stop:
+                return generated_token_ids
+
+            # Bonus: sample from target at position n_accepted (the slot after last accepted)
+            bonus_tok = self.sample_token(target_logits_all[:, n_accepted], temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
+            bonus_id = bonus_tok[0].item()
+            generated_token_ids.append(bonus_id)
+            pbar.update(1)
+            next_token = bonus_tok
+
+            if bonus_id in stop_tokens or len(generated_token_ids) >= max_length:
+                return generated_token_ids
+
+            # 4. Rollback base kv for rejected draft positions
+            num_rejected = len(drafted) - n_accepted
+            if num_rejected > 0:
+                # Restore DeltaNet state snapshot, reset full-attn index to pre-verify
+                past_kv = self._restore_linear_states(past_kv, lin_snap, base_full_idx)
+                # Replay kept tokens (next_token + first n_accepted drafted)
+                replay = verify_tokens[:, :n_accepted + 1]
+                replay_embeds = self.model.embed_tokens(replay).to(execution_dtype)
+                vx, _, past_kv = self.model.forward(None, embeds=replay_embeds, attention_mask=None, past_key_values=past_kv)
+
+            # MTP rollback: index back to pre-draft, replay accepted tokens to resync MTP cache
+            mtp_kv = self._rollback_mtp_index(mtp_kv, mtp_idx)
+            replay = verify_tokens[:, :n_accepted + 1]
+            replay_embeds = self.model.embed_tokens(replay).to(execution_dtype)
+            mtp_hidden, mtp_kv = self._mtp_forward(vx[:, :n_accepted + 1], replay_embeds, mtp_kv, seq_len=n_accepted + 1, spec_step_idx=0)
+            last_mtp_hidden = mtp_hidden[:, -1:]
+
+            if stop_hit_in_draft and n_accepted == len(drafted):
+                return generated_token_ids
+
+        return generated_token_ids
+
 
 # Tokenizer and Text Encoder Wrappers
 
@@ -831,3 +1093,32 @@ def te(dtype_llama=None, llama_quantization_metadata=None, model_type="qwen35_2b
                 model_options["quantization_metadata"] = llama_quantization_metadata
             super().__init__(device=device, dtype=dtype, model_options=model_options, model_type=model_type)
     return Qwen35TEModel_
+
+
+class Qwen35ClipModelMTP(sd1_clip.SDClipModel):
+    def __init__(self, device="cpu", layer="hidden", layer_idx=-2, dtype=None, attention_mask=True, model_options={}, model_type="qwen35_2b"):
+        class Qwen35_MTP_(Qwen35_MTP):
+            pass
+        Qwen35_MTP_.model_type = model_type
+
+        super().__init__(device=device, layer=layer, layer_idx=layer_idx, textmodel_json_config={},
+            dtype=dtype, special_tokens={"pad": 248044}, layer_norm_hidden_state=False,
+            model_class=Qwen35_MTP_, enable_attention_masks=attention_mask, return_attention_masks=attention_mask, model_options=model_options)
+
+
+class Qwen35TEModelMTP(sd1_clip.SD1ClipModel):
+    def __init__(self, device="cpu", dtype=None, model_options={}, model_type="qwen35_2b"):
+        clip_model = lambda **kw: Qwen35ClipModelMTP(**kw, model_type=model_type)
+        super().__init__(device=device, dtype=dtype, name=model_type, clip_model=clip_model, model_options=model_options)
+
+
+def te_mtp(dtype_llama=None, llama_quantization_metadata=None, model_type="qwen35_2b"):
+    class Qwen35TEModelMTP_(Qwen35TEModelMTP):
+        def __init__(self, device="cpu", dtype=None, model_options={}):
+            if dtype_llama is not None:
+                dtype = dtype_llama
+            if llama_quantization_metadata is not None:
+                model_options = model_options.copy()
+                model_options["quantization_metadata"] = llama_quantization_metadata
+            super().__init__(device=device, dtype=dtype, model_options=model_options, model_type=model_type)
+    return Qwen35TEModelMTP_
