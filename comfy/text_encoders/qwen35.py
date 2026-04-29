@@ -908,6 +908,7 @@ class Qwen35_MTP(Qwen35):
 
         # Prefill base
         x, _, past_kv = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_kv)
+        pre_norm_x = self.model._pre_norm_hidden  # Pre-norm hidden for MTP
         logits = self.logits(x)[:, -1]
         next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
         token_id = next_token[0].item()
@@ -917,9 +918,9 @@ class Qwen35_MTP(Qwen35):
         if token_id in stop_tokens:
             return generated_token_ids
 
-        # Prefill MTP over prompt to sync its kv cache
-        mtp_hidden, mtp_kv = self._mtp_forward(x, embeds, mtp_kv, seq_len=embeds.shape[1], spec_step_idx=0)
-        last_mtp_hidden = mtp_hidden[:, -1:]
+        # Prefill MTP over prompt to sync its kv cache (use pre-norm base hidden)
+        mtp_hidden, mtp_kv = self._mtp_forward(pre_norm_x, embeds, mtp_kv, seq_len=embeds.shape[1], spec_step_idx=0)
+        last_base_hidden = pre_norm_x[:, -1:]  # Track base pre-norm hidden for MTP
 
         while len(generated_token_ids) < max_length:
             # Snapshot state for rollback
@@ -929,7 +930,7 @@ class Qwen35_MTP(Qwen35):
 
             # 1. Draft k tokens via MTP
             drafted = []
-            dh = last_mtp_hidden
+            dh = last_base_hidden  # Use base pre-norm hidden, not MTP output
             de = self.model.embed_tokens(next_token).to(execution_dtype)
             stop_hit_in_draft = False
             for i in range(k_draft):
@@ -942,12 +943,13 @@ class Qwen35_MTP(Qwen35):
                     stop_hit_in_draft = True
                     break
 
-            # 2. Verify: run base model on [next_token, drafted[0..k-2]]
-            #    Base output at pos i predicts token at pos i+1
-            verify_ids = [next_token] + [t.view(1, 1) for t in drafted[:-1]] if drafted else [next_token]
+            # 2. Verify: run base model on [next_token, all drafted tokens]
+            #    Base output at pos i predicts token at pos i+1; pos k provides bonus logits
+            verify_ids = [next_token] + [t.view(1, 1) for t in drafted]
             verify_tokens = torch.cat(verify_ids, dim=1)
             verify_embeds = self.model.embed_tokens(verify_tokens).to(execution_dtype)
             vx, _, past_kv = self.model.forward(None, embeds=verify_embeds, attention_mask=None, past_key_values=past_kv)
+            pre_norm_vx = self.model._pre_norm_hidden  # Pre-norm hidden for MTP
             target_logits_all = self._logits_from_hidden(vx)
 
             # 3. Accept
@@ -991,13 +993,14 @@ class Qwen35_MTP(Qwen35):
                 replay = verify_tokens[:, :n_accepted + 1]
                 replay_embeds = self.model.embed_tokens(replay).to(execution_dtype)
                 vx, _, past_kv = self.model.forward(None, embeds=replay_embeds, attention_mask=None, past_key_values=past_kv)
+                pre_norm_vx = self.model._pre_norm_hidden  # Update pre-norm after replay
 
             # MTP rollback: index back to pre-draft, replay accepted tokens to resync MTP cache
             mtp_kv = self._rollback_mtp_index(mtp_kv, mtp_idx)
             replay = verify_tokens[:, :n_accepted + 1]
             replay_embeds = self.model.embed_tokens(replay).to(execution_dtype)
-            mtp_hidden, mtp_kv = self._mtp_forward(vx[:, :n_accepted + 1], replay_embeds, mtp_kv, seq_len=n_accepted + 1, spec_step_idx=0)
-            last_mtp_hidden = mtp_hidden[:, -1:]
+            mtp_hidden, mtp_kv = self._mtp_forward(pre_norm_vx[:, :n_accepted + 1], replay_embeds, mtp_kv, seq_len=n_accepted + 1, spec_step_idx=0)
+            last_base_hidden = pre_norm_vx[:, n_accepted:n_accepted + 1]  # Base hidden at last accepted pos
 
             if stop_hit_in_draft and n_accepted == len(drafted):
                 return generated_token_ids

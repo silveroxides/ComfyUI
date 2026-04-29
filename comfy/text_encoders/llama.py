@@ -761,6 +761,8 @@ class Llama2_(nn.Module):
             if i == intermediate_output:
                 intermediate = x.clone()
 
+        self._pre_norm_hidden = x  # Pre-norm hidden states for MTP access
+
         if self.norm is not None:
             x = self.norm(x)
 
