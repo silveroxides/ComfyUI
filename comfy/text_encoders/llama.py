@@ -716,6 +716,7 @@ class Llama2_(nn.Module):
 
         if seq_len > 1:
             causal_mask = torch.empty(past_len + seq_len, past_len + seq_len, dtype=x.dtype, device=x.device).fill_(torch.finfo(x.dtype).min / 4).triu_(1)
+            causal_mask = causal_mask[-seq_len:]  # [seq_len, past_len + seq_len] for KV-cache compat
             if mask is not None:
                 mask += causal_mask
             else:

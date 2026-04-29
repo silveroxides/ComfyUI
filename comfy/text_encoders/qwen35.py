@@ -848,6 +848,7 @@ class Qwen35_MTP(Qwen35):
         mask = None
         if seq_len > 1:
             mask = torch.empty(past_len + seq_len, past_len + seq_len, dtype=inputs_embeds.dtype, device=device).fill_(torch.finfo(inputs_embeds.dtype).min / 4).triu_(1)
+            mask = mask[-seq_len:]  # [seq_len, past_len + seq_len] for KV-cache compat
 
         optimized_attention = optimized_attention_for_device(device, mask=mask is not None, small_input=True)
 
