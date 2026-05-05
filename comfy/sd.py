@@ -1320,8 +1320,13 @@ def detect_te_model(sd):
             return TEModel.QWEN25_3B
         if weight.shape[0] == 512:
             return TEModel.QWEN25_7B
-    if "model.language_model.layers.0.linear_attn.A_log" in sd and "model.language_model.layers.0.input_layernorm.weight" in sd:
-        weight = sd['model.language_model.layers.0.input_layernorm.weight']
+    if ("model.language_model.layers.0.linear_attn.A_log" in sd and "model.language_model.layers.0.input_layernorm.weight" in sd) or \
+       ("model.layers.0.linear_attn.A_log" in sd and "model.layers.0.input_layernorm.weight" in sd):
+        if "model.language_model.layers.0.input_layernorm.weight" in sd:
+            weight = sd['model.language_model.layers.0.input_layernorm.weight']
+        else:
+            weight = sd['model.layers.0.input_layernorm.weight']
+
         if weight.shape[0] == 1024:
             return TEModel.QWEN35_08B
         if weight.shape[0] == 2560:
@@ -1508,8 +1513,12 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
         elif te_model in (TEModel.QWEN35_08B, TEModel.QWEN35_2B, TEModel.QWEN35_4B, TEModel.QWEN35_9B, TEModel.QWEN35_27B):
             clip_data[0] = comfy.utils.state_dict_prefix_replace(clip_data[0], {"model.language_model.": "model.", "model.visual.": "visual.", "lm_head.": "model.lm_head."})
             qwen35_type = {TEModel.QWEN35_08B: "qwen35_08b", TEModel.QWEN35_2B: "qwen35_2b", TEModel.QWEN35_4B: "qwen35_4b", TEModel.QWEN35_9B: "qwen35_9b", TEModel.QWEN35_27B: "qwen35_27b"}[te_model]
-            clip_target.clip = comfy.text_encoders.qwen35.te(**llama_detect(clip_data), model_type=qwen35_type)
-            clip_target.tokenizer = comfy.text_encoders.qwen35.tokenizer(model_type=qwen35_type)
+            if te_model == TEModel.QWEN35_4B:
+                clip_target.clip = comfy.text_encoders.anima.qwen35_te(**llama_detect(clip_data))
+                clip_target.tokenizer = comfy.text_encoders.anima.AnimaQwen35Tokenizer
+            else:
+                clip_target.clip = comfy.text_encoders.qwen35.te(**llama_detect(clip_data), model_type=qwen35_type)
+                clip_target.tokenizer = comfy.text_encoders.qwen35.tokenizer(model_type=qwen35_type)
         elif te_model == TEModel.QWEN3_06B:
             clip_target.clip = comfy.text_encoders.anima.te(**llama_detect(clip_data))
             clip_target.tokenizer = comfy.text_encoders.anima.AnimaTokenizer

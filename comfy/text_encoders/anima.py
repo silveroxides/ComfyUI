@@ -1,5 +1,6 @@
 from transformers import Qwen2Tokenizer, T5TokenizerFast
 import comfy.text_encoders.llama
+import comfy.text_encoders.qwen35
 from comfy import sd1_clip
 import os
 import torch
@@ -36,9 +37,64 @@ class AnimaTokenizer:
     def decode(self, token_ids, **kwargs):
         return self.qwen3_06b.decode(token_ids, **kwargs)
 
+class Qwen35_4BTokenizer(comfy.text_encoders.qwen35.Qwen35Tokenizer):
+    def __init__(self, embedding_directory=None, tokenizer_data={}):
+        super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, embedding_size=1024, embedding_key='qwen35_4b')
+
+class AnimaQwen35Tokenizer:
+    def __init__(self, embedding_directory=None, tokenizer_data={}):
+        self.qwen35_4b = Qwen35_4BTokenizer(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data)
+        self.t5xxl = T5XXLTokenizer(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data)
+
+    def tokenize_with_weights(self, text:str, return_word_ids=False, **kwargs):
+        out = {}
+        qwen_ids = self.qwen35_4b.tokenize_with_weights(text, return_word_ids, **kwargs)
+        out["qwen35_4b"] = [[(k[0], 1.0, k[2]) if return_word_ids else (k[0], 1.0) for k in inner_list] for inner_list in qwen_ids]  # Set weights to 1.0
+        out["t5xxl"] = self.t5xxl.tokenize_with_weights(text, return_word_ids, **kwargs)
+        return out
+
+    def untokenize(self, token_weight_pair):
+        return self.t5xxl.untokenize(token_weight_pair)
+
+    def state_dict(self):
+        return {}
+
+    def decode(self, token_ids, **kwargs):
+        return self.qwen35_4b.decode(token_ids, **kwargs)
+
 class Qwen3_06BModel(sd1_clip.SDClipModel):
     def __init__(self, device="cpu", layer="last", layer_idx=None, dtype=None, attention_mask=True, model_options={}):
         super().__init__(device=device, layer=layer, layer_idx=layer_idx, textmodel_json_config={}, dtype=dtype, special_tokens={"pad": 151643}, layer_norm_hidden_state=False, model_class=comfy.text_encoders.llama.Qwen3_06B, enable_attention_masks=attention_mask, return_attention_masks=attention_mask, model_options=model_options)
+
+class AnimaQwen35(comfy.text_encoders.qwen35.Qwen35):
+    model_type = "qwen35_4b"
+    def __init__(self, config_dict, dtype, device, operations):
+        config_dict = dict(config_dict)
+        config_dict["final_norm"] = False
+        super().__init__(config_dict, dtype, device, operations)
+        ops = operations
+        self.model.norm = torch.nn.Sequential(
+            ops.Linear(2560, 1024, bias=True, device=device, dtype=dtype),
+            comfy.text_encoders.qwen35.ExpRMSNorm(1024, device=device, dtype=dtype),
+            torch.nn.SiLU(),
+            ops.Linear(1024, 1024, bias=True, device=device, dtype=dtype),
+        )
+
+class Qwen35_4BAnimaClipModel(sd1_clip.SDClipModel):
+    def __init__(self, device="cpu", dtype=None, model_options={}, **kwargs):
+        textmodel_json_config = {}
+        super().__init__(device=device, layer="last", layer_idx=None, textmodel_json_config=textmodel_json_config, dtype=dtype, special_tokens={"pad": 248044}, layer_norm_hidden_state=False, model_class=AnimaQwen35, enable_attention_masks=True, return_attention_masks=True, model_options=model_options)
+
+class AnimaQwen35TEModel(sd1_clip.SD1ClipModel):
+    def __init__(self, device="cpu", dtype=None, model_options={}):
+        super().__init__(device=device, dtype=dtype, name="qwen35_4b", clip_model=Qwen35_4BAnimaClipModel, model_options=model_options)
+
+    def encode_token_weights(self, token_weight_pairs):
+        out = super().encode_token_weights(token_weight_pairs)
+        if "t5xxl" in token_weight_pairs:
+            out[2]["t5xxl_ids"] = torch.tensor(list(map(lambda a: a[0], token_weight_pairs["t5xxl"][0])), dtype=torch.int)
+            out[2]["t5xxl_weights"] = torch.tensor(list(map(lambda a: a[1], token_weight_pairs["t5xxl"][0])))
+        return out
 
 
 class AnimaTEModel(sd1_clip.SD1ClipModel):
@@ -61,3 +117,14 @@ def te(dtype_llama=None, llama_quantization_metadata=None):
                 model_options["quantization_metadata"] = llama_quantization_metadata
             super().__init__(device=device, dtype=dtype, model_options=model_options)
     return AnimaTEModel_
+
+def qwen35_te(dtype_llama=None, llama_quantization_metadata=None):
+    class AnimaQwen35TEModel_(AnimaQwen35TEModel):
+        def __init__(self, device="cpu", dtype=None, model_options={}):
+            if dtype_llama is not None:
+                dtype = dtype_llama
+            if llama_quantization_metadata is not None:
+                model_options = model_options.copy()
+                model_options["quantization_metadata"] = llama_quantization_metadata
+            super().__init__(device=device, dtype=dtype, model_options=model_options)
+    return AnimaQwen35TEModel_

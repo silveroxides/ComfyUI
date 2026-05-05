@@ -10,6 +10,7 @@ from comfy.ldm.modules.attention import optimized_attention_for_device
 from comfy import sd1_clip
 import comfy.text_encoders.qwen_vl
 
+from comfy.ldm.common_dit import rms_norm
 from .llama import BaseLlama, BaseGenerate, Llama2_, MLP, RMSNorm, apply_rope
 
 
@@ -43,6 +44,7 @@ class Qwen35Config:
     mlp_activation: str = "silu"
     qkv_bias: bool = False
     final_norm: bool = True
+    exp_rms_norm: bool = False
     lm_head: bool = False
     stop_tokens: list = field(default_factory=lambda: [248044, 248046])
     # These are needed for BaseLlama/BaseGenerate compatibility but unused directly
@@ -73,6 +75,15 @@ def _make_config(model_type, config_dict={}):
 class RMSNormGated(RMSNorm):
     def forward(self, x, gate):
         return super().forward(x) * F.silu(gate.to(x.dtype))
+
+class ExpRMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6, device=None, dtype=None):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(dim, device=device, dtype=dtype))
+        self.eps = eps
+
+    def forward(self, x):
+        return rms_norm(x, torch.exp(self.weight.float()).to(x.dtype), self.eps)
 
 def torch_chunk_gated_delta_rule(query, key, value, g, beta, chunk_size=64, initial_state=None, output_final_state=False):
     initial_dtype = query.dtype
@@ -415,7 +426,10 @@ class Qwen35Transformer(Llama2_):
         ])
 
         if config.final_norm:
-            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
+            if getattr(config, "exp_rms_norm", False):
+                self.norm = ExpRMSNorm(config.hidden_size, eps=config.rms_norm_eps, device=device, dtype=dtype)
+            else:
+                self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
         else:
             self.norm = None
 
