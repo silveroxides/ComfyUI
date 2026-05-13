@@ -16,7 +16,7 @@ def pad_to_patch_size(img, patch_size=(2, 2), padding_mode="circular"):
 
 rms_norm = comfy.rmsnorm.rms_norm
 
-def process_img(x, index=0, h_offset=0, w_offset=0, patch_size=(2, 2), transformer_options={}):
+def process_img(x, index=0, h_offset=0, w_offset=0, patch_size=2, transformer_options={}):
     bs, c, h, w = x.shape
     x = pad_to_patch_size(x, (patch_size, patch_size))
 
