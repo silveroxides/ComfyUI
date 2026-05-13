@@ -52,8 +52,8 @@ class ModelSamplingDiscrete:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "model": ("MODEL",),
-                              "sampling": (["eps", "v_prediction", "lcm", "x0", "img_to_img"],),
-                              "zsnr": ("BOOLEAN", {"default": False}),
+                              "sampling": (["eps", "v_prediction", "lcm", "x0", "img_to_img", "img_to_img_flow"],),
+                              "zsnr": ("BOOLEAN", {"default": False, "advanced": True}),
                               }}
 
     RETURN_TYPES = ("MODEL",)
@@ -76,6 +76,8 @@ class ModelSamplingDiscrete:
             sampling_type = comfy.model_sampling.X0
         elif sampling == "img_to_img":
             sampling_type = comfy.model_sampling.IMG_TO_IMG
+        elif sampling == "img_to_img_flow":
+            sampling_type = comfy.model_sampling.IMG_TO_IMG_FLOW
 
         class ModelSamplingAdvanced(sampling_base, sampling_type):
             pass
@@ -153,8 +155,8 @@ class ModelSamplingFlux:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "model": ("MODEL",),
-                              "max_shift": ("FLOAT", {"default": 1.15, "min": 0.0, "max": 100.0, "step":0.01}),
-                              "base_shift": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 100.0, "step":0.01}),
+                              "max_shift": ("FLOAT", {"default": 1.15, "min": 0.0, "max": 100.0, "step":0.01, "advanced": True}),
+                              "base_shift": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 100.0, "step":0.01, "advanced": True}),
                               "width": ("INT", {"default": 1024, "min": 16, "max": nodes.MAX_RESOLUTION, "step": 8}),
                               "height": ("INT", {"default": 1024, "min": 16, "max": nodes.MAX_RESOLUTION, "step": 8}),
                               }}
@@ -190,8 +192,8 @@ class ModelSamplingContinuousEDM:
     def INPUT_TYPES(s):
         return {"required": { "model": ("MODEL",),
                               "sampling": (["v_prediction", "edm", "edm_playground_v2.5", "eps", "cosmos_rflow"],),
-                              "sigma_max": ("FLOAT", {"default": 120.0, "min": 0.0, "max": 1000.0, "step":0.001, "round": False}),
-                              "sigma_min": ("FLOAT", {"default": 0.002, "min": 0.0, "max": 1000.0, "step":0.001, "round": False}),
+                              "sigma_max": ("FLOAT", {"default": 120.0, "min": 0.0, "max": 1000.0, "step":0.001, "round": False, "advanced": True}),
+                              "sigma_min": ("FLOAT", {"default": 0.002, "min": 0.0, "max": 1000.0, "step":0.001, "round": False, "advanced": True}),
                               }}
 
     RETURN_TYPES = ("MODEL",)
@@ -235,8 +237,8 @@ class ModelSamplingContinuousV:
     def INPUT_TYPES(s):
         return {"required": { "model": ("MODEL",),
                               "sampling": (["v_prediction"],),
-                              "sigma_max": ("FLOAT", {"default": 500.0, "min": 0.0, "max": 1000.0, "step":0.001, "round": False}),
-                              "sigma_min": ("FLOAT", {"default": 0.03, "min": 0.0, "max": 1000.0, "step":0.001, "round": False}),
+                              "sigma_max": ("FLOAT", {"default": 500.0, "min": 0.0, "max": 1000.0, "step":0.001, "round": False, "advanced": True}),
+                              "sigma_min": ("FLOAT", {"default": 0.03, "min": 0.0, "max": 1000.0, "step":0.001, "round": False, "advanced": True}),
                               }}
 
     RETURN_TYPES = ("MODEL",)
@@ -298,11 +300,35 @@ class RescaleCFG:
         m.set_model_sampler_cfg_function(rescale_cfg)
         return (m, )
 
-class ModelComputeDtype:
+class ModelNoiseScale:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "model": ("MODEL",),
-                              "dtype": (["default", "fp32", "fp16", "bf16"],),
+                              "noise_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 64.0, "step": 0.01,
+                                                       "tooltip": "Absolute training noise scale. For example HiDream-O1 base: 8.0, dev: 7.5."}),
+                              }}
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "patch"
+
+    CATEGORY = "advanced/model"
+
+    def patch(self, model, noise_scale):
+        m = model.clone()
+        original = m.model.model_sampling
+        ms = type(original)(m.model.model_config)
+        ms.set_parameters(shift=original.shift, multiplier=original.multiplier)
+        ms.set_noise_scale(noise_scale)
+        m.add_object_patch("model_sampling", ms)
+        return (m, )
+
+
+class ModelComputeDtype:
+    SEARCH_ALIASES = ["model precision", "change dtype"]
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "model": ("MODEL",),
+                              "dtype": (["default", "fp32", "fp16", "bf16"], {"advanced": True}),
                               }}
 
     RETURN_TYPES = ("MODEL",)
@@ -324,6 +350,7 @@ NODE_CLASS_MAPPINGS = {
     "ModelSamplingSD3": ModelSamplingSD3,
     "ModelSamplingAuraFlow": ModelSamplingAuraFlow,
     "ModelSamplingFlux": ModelSamplingFlux,
+    "ModelNoiseScale": ModelNoiseScale,
     "RescaleCFG": RescaleCFG,
     "ModelComputeDtype": ModelComputeDtype,
 }

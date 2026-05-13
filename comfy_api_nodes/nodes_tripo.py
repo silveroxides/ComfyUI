@@ -1,11 +1,7 @@
-import os
-from typing import Optional
-
-import torch
 from typing_extensions import override
 
-from comfy_api.latest import IO, ComfyExtension
-from comfy_api_nodes.apis.tripo_api import (
+from comfy_api.latest import IO, ComfyExtension, Input
+from comfy_api_nodes.apis.tripo import (
     TripoAnimateRetargetRequest,
     TripoAnimateRigRequest,
     TripoConvertModelRequest,
@@ -26,12 +22,11 @@ from comfy_api_nodes.apis.tripo_api import (
 )
 from comfy_api_nodes.util import (
     ApiEndpoint,
-    download_url_as_bytesio,
+    download_url_to_file_3d,
     poll_op,
     sync_op,
     upload_images_to_comfyapi,
 )
-from folder_paths import get_output_directory
 
 
 def get_model_url_from_response(response: TripoTaskResponse) -> str:
@@ -45,7 +40,7 @@ def get_model_url_from_response(response: TripoTaskResponse) -> str:
 async def poll_until_finished(
     node_cls: type[IO.ComfyNode],
     response: TripoTaskResponse,
-    average_duration: Optional[int] = None,
+    average_duration: int | None = None,
 ) -> IO.NodeOutput:
     """Polls the Tripo API endpoint until the task reaches a terminal state, then returns the response."""
     if response.code != 0:
@@ -65,16 +60,13 @@ async def poll_until_finished(
         ],
         status_extractor=lambda x: x.data.status,
         progress_extractor=lambda x: x.data.progress,
+        price_extractor=lambda x: x.data.consumed_credit * 0.01 if x.data.consumed_credit else None,
         estimated_duration=average_duration,
     )
     if response_poll.data.status == TripoTaskStatus.SUCCESS:
         url = get_model_url_from_response(response_poll)
-        bytesio = await download_url_as_bytesio(url)
-        # Save the downloaded model file
-        model_file = f"tripo_model_{task_id}.glb"
-        with open(os.path.join(get_output_directory(), model_file), "wb") as f:
-            f.write(bytesio.getvalue())
-        return IO.NodeOutput(model_file, task_id)
+        file_glb = await download_url_to_file_3d(url, "glb", task_id=task_id)
+        return IO.NodeOutput(f"{task_id}.glb", task_id, file_glb)
     raise RuntimeError(f"Failed to generate mesh: {response_poll}")
 
 
@@ -98,17 +90,18 @@ class TripoTextToModelNode(IO.ComfyNode):
                 IO.Combo.Input("style", options=TripoStyle, default="None", optional=True),
                 IO.Boolean.Input("texture", default=True, optional=True),
                 IO.Boolean.Input("pbr", default=True, optional=True),
-                IO.Int.Input("image_seed", default=42, optional=True),
-                IO.Int.Input("model_seed", default=42, optional=True),
-                IO.Int.Input("texture_seed", default=42, optional=True),
-                IO.Combo.Input("texture_quality", default="standard", options=["standard", "detailed"], optional=True),
-                IO.Int.Input("face_limit", default=-1, min=-1, max=2000000, optional=True),
-                IO.Boolean.Input("quad", default=False, optional=True),
-                IO.Combo.Input("geometry_quality", default="standard", options=["standard", "detailed"], optional=True),
+                IO.Int.Input("image_seed", default=42, optional=True, advanced=True),
+                IO.Int.Input("model_seed", default=42, optional=True, advanced=True),
+                IO.Int.Input("texture_seed", default=42, optional=True, advanced=True),
+                IO.Combo.Input("texture_quality", default="standard", options=["standard", "detailed"], optional=True, advanced=True),
+                IO.Int.Input("face_limit", default=-1, min=-1, max=2000000, optional=True, advanced=True),
+                IO.Boolean.Input("quad", default=False, optional=True, advanced=True),
+                IO.Combo.Input("geometry_quality", default="standard", options=["standard", "detailed"], optional=True, advanced=True),
             ],
             outputs=[
-                IO.String.Output(display_name="model_file"),
+                IO.String.Output(display_name="model_file"),  # for backward compatibility only
                 IO.Custom("MODEL_TASK_ID").Output(display_name="model task_id"),
+                IO.File3DGLB.Output(display_name="GLB"),
             ],
             hidden=[
                 IO.Hidden.auth_token_comfy_org,
@@ -117,24 +110,52 @@ class TripoTextToModelNode(IO.ComfyNode):
             ],
             is_api_node=True,
             is_output_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(
+                    widgets=[
+                        "model_version",
+                        "texture",
+                        "pbr",
+                        "quad",
+                        "texture_quality",
+                        "geometry_quality",
+                    ],
+                ),
+                expr="""
+                (
+                  $isV14 := $contains(widgets.model_version,"v1.4");
+                  $isV3OrLater := $contains(widgets.model_version,"v3.");
+                  $withTexture := widgets.texture or widgets.pbr;
+                  $isHdTexture := (widgets.texture_quality = "detailed");
+                  $isDetailedGeometry := (widgets.geometry_quality = "detailed");
+                  $credits := $isV14 ? 20 : (
+                    ($withTexture ? 20 : 10)
+                    + (widgets.quad ? 5 : 0)
+                    + ($isHdTexture ? 10 : 0)
+                    + (($isDetailedGeometry and $isV3OrLater) ? 20 : 0)
+                  );
+                  {"type":"usd","usd": $round($credits * 0.01, 2), "format": {"approximate": true}}
+                )
+                """,
+            ),
         )
 
     @classmethod
     async def execute(
         cls,
         prompt: str,
-        negative_prompt: Optional[str] = None,
+        negative_prompt: str | None = None,
         model_version=None,
-        style: Optional[str] = None,
-        texture: Optional[bool] = None,
-        pbr: Optional[bool] = None,
-        image_seed: Optional[int] = None,
-        model_seed: Optional[int] = None,
-        texture_seed: Optional[int] = None,
-        texture_quality: Optional[str] = None,
-        geometry_quality: Optional[str] = None,
-        face_limit: Optional[int] = None,
-        quad: Optional[bool] = None,
+        style: str | None = None,
+        texture: bool | None = None,
+        pbr: bool | None = None,
+        image_seed: int | None = None,
+        model_seed: int | None = None,
+        texture_seed: int | None = None,
+        texture_quality: str | None = None,
+        geometry_quality: str | None = None,
+        face_limit: int | None = None,
+        quad: bool | None = None,
     ) -> IO.NodeOutput:
         style_enum = None if style == "None" else style
         if not prompt:
@@ -186,22 +207,23 @@ class TripoImageToModelNode(IO.ComfyNode):
                 IO.Combo.Input("style", options=TripoStyle, default="None", optional=True),
                 IO.Boolean.Input("texture", default=True, optional=True),
                 IO.Boolean.Input("pbr", default=True, optional=True),
-                IO.Int.Input("model_seed", default=42, optional=True),
+                IO.Int.Input("model_seed", default=42, optional=True, advanced=True),
                 IO.Combo.Input(
-                    "orientation", options=TripoOrientation, default=TripoOrientation.DEFAULT, optional=True
+                    "orientation", options=TripoOrientation, default=TripoOrientation.DEFAULT, optional=True, advanced=True
                 ),
-                IO.Int.Input("texture_seed", default=42, optional=True),
-                IO.Combo.Input("texture_quality", default="standard", options=["standard", "detailed"], optional=True),
+                IO.Int.Input("texture_seed", default=42, optional=True, advanced=True),
+                IO.Combo.Input("texture_quality", default="standard", options=["standard", "detailed"], optional=True, advanced=True),
                 IO.Combo.Input(
-                    "texture_alignment", default="original_image", options=["original_image", "geometry"], optional=True
+                    "texture_alignment", default="original_image", options=["original_image", "geometry"], optional=True, advanced=True
                 ),
-                IO.Int.Input("face_limit", default=-1, min=-1, max=500000, optional=True),
-                IO.Boolean.Input("quad", default=False, optional=True),
-                IO.Combo.Input("geometry_quality", default="standard", options=["standard", "detailed"], optional=True),
+                IO.Int.Input("face_limit", default=-1, min=-1, max=500000, optional=True, advanced=True),
+                IO.Boolean.Input("quad", default=False, optional=True, advanced=True),
+                IO.Combo.Input("geometry_quality", default="standard", options=["standard", "detailed"], optional=True, advanced=True),
             ],
             outputs=[
-                IO.String.Output(display_name="model_file"),
+                IO.String.Output(display_name="model_file"),  # for backward compatibility only
                 IO.Custom("MODEL_TASK_ID").Output(display_name="model task_id"),
+                IO.File3DGLB.Output(display_name="GLB"),
             ],
             hidden=[
                 IO.Hidden.auth_token_comfy_org,
@@ -210,24 +232,52 @@ class TripoImageToModelNode(IO.ComfyNode):
             ],
             is_api_node=True,
             is_output_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(
+                    widgets=[
+                        "model_version",
+                        "texture",
+                        "pbr",
+                        "quad",
+                        "texture_quality",
+                        "geometry_quality",
+                    ],
+                ),
+                expr="""
+                (
+                  $isV14 := $contains(widgets.model_version,"v1.4");
+                  $isV3OrLater := $contains(widgets.model_version,"v3.");
+                  $withTexture := widgets.texture or widgets.pbr;
+                  $isHdTexture := (widgets.texture_quality = "detailed");
+                  $isDetailedGeometry := (widgets.geometry_quality = "detailed");
+                  $credits := $isV14 ? 30 : (
+                    ($withTexture ? 30 : 20)
+                    + (widgets.quad ? 5 : 0)
+                    + ($isHdTexture ? 10 : 0)
+                    + (($isDetailedGeometry and $isV3OrLater) ? 20 : 0)
+                  );
+                  {"type":"usd","usd": $round($credits * 0.01, 2), "format": {"approximate": true}}
+                )
+                """,
+            ),
         )
 
     @classmethod
     async def execute(
         cls,
-        image: torch.Tensor,
-        model_version: Optional[str] = None,
-        style: Optional[str] = None,
-        texture: Optional[bool] = None,
-        pbr: Optional[bool] = None,
-        model_seed: Optional[int] = None,
+        image: Input.Image,
+        model_version: str | None = None,
+        style: str | None = None,
+        texture: bool | None = None,
+        pbr: bool | None = None,
+        model_seed: int | None = None,
         orientation=None,
-        texture_seed: Optional[int] = None,
-        texture_quality: Optional[str] = None,
-        geometry_quality: Optional[str] = None,
-        texture_alignment: Optional[str] = None,
-        face_limit: Optional[int] = None,
-        quad: Optional[bool] = None,
+        texture_seed: int | None = None,
+        texture_quality: str | None = None,
+        geometry_quality: str | None = None,
+        texture_alignment: str | None = None,
+        face_limit: int | None = None,
+        quad: bool | None = None,
     ) -> IO.NodeOutput:
         style_enum = None if style == "None" else style
         if image is None:
@@ -290,22 +340,24 @@ class TripoMultiviewToModelNode(IO.ComfyNode):
                     options=TripoOrientation,
                     default=TripoOrientation.DEFAULT,
                     optional=True,
+                    advanced=True,
                 ),
                 IO.Boolean.Input("texture", default=True, optional=True),
                 IO.Boolean.Input("pbr", default=True, optional=True),
-                IO.Int.Input("model_seed", default=42, optional=True),
-                IO.Int.Input("texture_seed", default=42, optional=True),
-                IO.Combo.Input("texture_quality", default="standard", options=["standard", "detailed"], optional=True),
+                IO.Int.Input("model_seed", default=42, optional=True, advanced=True),
+                IO.Int.Input("texture_seed", default=42, optional=True, advanced=True),
+                IO.Combo.Input("texture_quality", default="standard", options=["standard", "detailed"], optional=True, advanced=True),
                 IO.Combo.Input(
-                    "texture_alignment", default="original_image", options=["original_image", "geometry"], optional=True
+                    "texture_alignment", default="original_image", options=["original_image", "geometry"], optional=True, advanced=True
                 ),
-                IO.Int.Input("face_limit", default=-1, min=-1, max=500000, optional=True),
-                IO.Boolean.Input("quad", default=False, optional=True),
-                IO.Combo.Input("geometry_quality", default="standard", options=["standard", "detailed"], optional=True),
+                IO.Int.Input("face_limit", default=-1, min=-1, max=500000, optional=True, advanced=True),
+                IO.Boolean.Input("quad", default=False, optional=True, advanced=True, tooltip="This parameter is deprecated and does nothing."),
+                IO.Combo.Input("geometry_quality", default="standard", options=["standard", "detailed"], optional=True, advanced=True),
             ],
             outputs=[
-                IO.String.Output(display_name="model_file"),
+                IO.String.Output(display_name="model_file"),  # for backward compatibility only
                 IO.Custom("MODEL_TASK_ID").Output(display_name="model task_id"),
+                IO.File3DGLB.Output(display_name="GLB"),
             ],
             hidden=[
                 IO.Hidden.auth_token_comfy_org,
@@ -314,26 +366,52 @@ class TripoMultiviewToModelNode(IO.ComfyNode):
             ],
             is_api_node=True,
             is_output_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(
+                    widgets=[
+                        "model_version",
+                        "texture",
+                        "pbr",
+                        "texture_quality",
+                        "geometry_quality",
+                    ],
+                ),
+                expr="""
+                (
+                  $isV14 := $contains(widgets.model_version,"v1.4");
+                  $isV3OrLater := $contains(widgets.model_version,"v3.");
+                  $withTexture := widgets.texture or widgets.pbr;
+                  $isHdTexture := (widgets.texture_quality = "detailed");
+                  $isDetailedGeometry := (widgets.geometry_quality = "detailed");
+                  $credits := $isV14 ? 30 : (
+                    ($withTexture ? 30 : 20)
+                    + ($isHdTexture ? 10 : 0)
+                    + (($isDetailedGeometry and $isV3OrLater) ? 20 : 0)
+                  );
+                  {"type":"usd","usd": $round($credits * 0.01, 2), "format": {"approximate": true}}
+                )
+                """,
+            ),
         )
 
     @classmethod
     async def execute(
         cls,
-        image: torch.Tensor,
-        image_left: Optional[torch.Tensor] = None,
-        image_back: Optional[torch.Tensor] = None,
-        image_right: Optional[torch.Tensor] = None,
-        model_version: Optional[str] = None,
-        orientation: Optional[str] = None,
-        texture: Optional[bool] = None,
-        pbr: Optional[bool] = None,
-        model_seed: Optional[int] = None,
-        texture_seed: Optional[int] = None,
-        texture_quality: Optional[str] = None,
-        geometry_quality: Optional[str] = None,
-        texture_alignment: Optional[str] = None,
-        face_limit: Optional[int] = None,
-        quad: Optional[bool] = None,
+        image: Input.Image,
+        image_left: Input.Image | None = None,
+        image_back: Input.Image | None = None,
+        image_right: Input.Image | None = None,
+        model_version: str | None = None,
+        orientation: str | None = None,
+        texture: bool | None = None,
+        pbr: bool | None = None,
+        model_seed: int | None = None,
+        texture_seed: int | None = None,
+        texture_quality: str | None = None,
+        geometry_quality: str | None = None,
+        texture_alignment: str | None = None,
+        face_limit: int | None = None,
+        quad: bool | None = None,
     ) -> IO.NodeOutput:
         if image is None:
             raise RuntimeError("front image for multiview is required")
@@ -370,7 +448,7 @@ class TripoMultiviewToModelNode(IO.ComfyNode):
                 geometry_quality=geometry_quality,
                 texture_alignment=texture_alignment,
                 face_limit=face_limit if face_limit != -1 else None,
-                quad=quad,
+                quad=None,
             ),
         )
         return await poll_until_finished(cls, response, average_duration=80)
@@ -388,15 +466,16 @@ class TripoTextureNode(IO.ComfyNode):
                 IO.Custom("MODEL_TASK_ID").Input("model_task_id"),
                 IO.Boolean.Input("texture", default=True, optional=True),
                 IO.Boolean.Input("pbr", default=True, optional=True),
-                IO.Int.Input("texture_seed", default=42, optional=True),
-                IO.Combo.Input("texture_quality", default="standard", options=["standard", "detailed"], optional=True),
+                IO.Int.Input("texture_seed", default=42, optional=True, advanced=True),
+                IO.Combo.Input("texture_quality", default="standard", options=["standard", "detailed"], optional=True, advanced=True),
                 IO.Combo.Input(
-                    "texture_alignment", default="original_image", options=["original_image", "geometry"], optional=True
+                    "texture_alignment", default="original_image", options=["original_image", "geometry"], optional=True, advanced=True
                 ),
             ],
             outputs=[
-                IO.String.Output(display_name="model_file"),
+                IO.String.Output(display_name="model_file"),  # for backward compatibility only
                 IO.Custom("MODEL_TASK_ID").Output(display_name="model task_id"),
+                IO.File3DGLB.Output(display_name="GLB"),
             ],
             hidden=[
                 IO.Hidden.auth_token_comfy_org,
@@ -405,17 +484,26 @@ class TripoTextureNode(IO.ComfyNode):
             ],
             is_api_node=True,
             is_output_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["texture_quality"]),
+                expr="""
+                (
+                  $tq := widgets.texture_quality;
+                  {"type":"usd","usd": ($contains($tq,"detailed") ? 0.2 : 0.1), "format": {"approximate": true}}
+                )
+                """,
+            ),
         )
 
     @classmethod
     async def execute(
         cls,
         model_task_id,
-        texture: Optional[bool] = None,
-        pbr: Optional[bool] = None,
-        texture_seed: Optional[int] = None,
-        texture_quality: Optional[str] = None,
-        texture_alignment: Optional[str] = None,
+        texture: bool | None = None,
+        pbr: bool | None = None,
+        texture_seed: int | None = None,
+        texture_quality: str | None = None,
+        texture_alignment: str | None = None,
     ) -> IO.NodeOutput:
         response = await sync_op(
             cls,
@@ -446,8 +534,9 @@ class TripoRefineNode(IO.ComfyNode):
                 IO.Custom("MODEL_TASK_ID").Input("model_task_id", tooltip="Must be a v1.4 Tripo model"),
             ],
             outputs=[
-                IO.String.Output(display_name="model_file"),
+                IO.String.Output(display_name="model_file"),  # for backward compatibility only
                 IO.Custom("MODEL_TASK_ID").Output(display_name="model task_id"),
+                IO.File3DGLB.Output(display_name="GLB"),
             ],
             hidden=[
                 IO.Hidden.auth_token_comfy_org,
@@ -456,6 +545,9 @@ class TripoRefineNode(IO.ComfyNode):
             ],
             is_api_node=True,
             is_output_node=True,
+            price_badge=IO.PriceBadge(
+                expr="""{"type":"usd","usd":0.3, "format": {"approximate": true}}""",
+            ),
         )
 
     @classmethod
@@ -479,8 +571,9 @@ class TripoRigNode(IO.ComfyNode):
             category="api node/3d/Tripo",
             inputs=[IO.Custom("MODEL_TASK_ID").Input("original_model_task_id")],
             outputs=[
-                IO.String.Output(display_name="model_file"),
+                IO.String.Output(display_name="model_file"),  # for backward compatibility only
                 IO.Custom("RIG_TASK_ID").Output(display_name="rig task_id"),
+                IO.File3DGLB.Output(display_name="GLB"),
             ],
             hidden=[
                 IO.Hidden.auth_token_comfy_org,
@@ -489,6 +582,9 @@ class TripoRigNode(IO.ComfyNode):
             ],
             is_api_node=True,
             is_output_node=True,
+            price_badge=IO.PriceBadge(
+                expr="""{"type":"usd","usd":0.25, "format": {"approximate": true}}""",
+            ),
         )
 
     @classmethod
@@ -535,8 +631,9 @@ class TripoRetargetNode(IO.ComfyNode):
                 ),
             ],
             outputs=[
-                IO.String.Output(display_name="model_file"),
+                IO.String.Output(display_name="model_file"),  # for backward compatibility only
                 IO.Custom("RETARGET_TASK_ID").Output(display_name="retarget task_id"),
+                IO.File3DGLB.Output(display_name="GLB"),
             ],
             hidden=[
                 IO.Hidden.auth_token_comfy_org,
@@ -545,6 +642,9 @@ class TripoRetargetNode(IO.ComfyNode):
             ],
             is_api_node=True,
             is_output_node=True,
+            price_badge=IO.PriceBadge(
+                expr="""{"type":"usd","usd":0.1, "format": {"approximate": true}}""",
+            ),
         )
 
     @classmethod
@@ -574,13 +674,14 @@ class TripoConversionNode(IO.ComfyNode):
             inputs=[
                 IO.Custom("MODEL_TASK_ID,RIG_TASK_ID,RETARGET_TASK_ID").Input("original_model_task_id"),
                 IO.Combo.Input("format", options=["GLTF", "USDZ", "FBX", "OBJ", "STL", "3MF"]),
-                IO.Boolean.Input("quad", default=False, optional=True),
+                IO.Boolean.Input("quad", default=False, optional=True, advanced=True),
                 IO.Int.Input(
                     "face_limit",
                     default=-1,
                     min=-1,
                     max=2000000,
                     optional=True,
+                    advanced=True,
                 ),
                 IO.Int.Input(
                     "texture_size",
@@ -588,47 +689,53 @@ class TripoConversionNode(IO.ComfyNode):
                     min=128,
                     max=4096,
                     optional=True,
+                    advanced=True,
                 ),
                 IO.Combo.Input(
                     "texture_format",
                     options=["BMP", "DPX", "HDR", "JPEG", "OPEN_EXR", "PNG", "TARGA", "TIFF", "WEBP"],
                     default="JPEG",
                     optional=True,
+                    advanced=True,
                 ),
-                IO.Boolean.Input("force_symmetry", default=False, optional=True),
-                IO.Boolean.Input("flatten_bottom", default=False, optional=True),
+                IO.Boolean.Input("force_symmetry", default=False, optional=True, advanced=True),
+                IO.Boolean.Input("flatten_bottom", default=False, optional=True, advanced=True),
                 IO.Float.Input(
                     "flatten_bottom_threshold",
                     default=0.0,
                     min=0.0,
                     max=1.0,
                     optional=True,
+                    advanced=True,
                 ),
-                IO.Boolean.Input("pivot_to_center_bottom", default=False, optional=True),
+                IO.Boolean.Input("pivot_to_center_bottom", default=False, optional=True, advanced=True),
                 IO.Float.Input(
                     "scale_factor",
                     default=1.0,
                     min=0.0,
                     optional=True,
+                    advanced=True,
                 ),
-                IO.Boolean.Input("with_animation", default=False, optional=True),
-                IO.Boolean.Input("pack_uv", default=False, optional=True),
-                IO.Boolean.Input("bake", default=False, optional=True),
-                IO.String.Input("part_names", default="", optional=True),  # comma-separated list
+                IO.Boolean.Input("with_animation", default=False, optional=True, advanced=True),
+                IO.Boolean.Input("pack_uv", default=False, optional=True, advanced=True),
+                IO.Boolean.Input("bake", default=False, optional=True, advanced=True),
+                IO.String.Input("part_names", default="", optional=True, advanced=True),  # comma-separated list
                 IO.Combo.Input(
                     "fbx_preset",
                     options=["blender", "mixamo", "3dsmax"],
                     default="blender",
                     optional=True,
+                    advanced=True,
                 ),
-                IO.Boolean.Input("export_vertex_colors", default=False, optional=True),
+                IO.Boolean.Input("export_vertex_colors", default=False, optional=True, advanced=True),
                 IO.Combo.Input(
                     "export_orientation",
                     options=["align_image", "default"],
                     default="default",
                     optional=True,
+                    advanced=True,
                 ),
-                IO.Boolean.Input("animate_in_place", default=False, optional=True),
+                IO.Boolean.Input("animate_in_place", default=False, optional=True, advanced=True),
             ],
             outputs=[],
             hidden=[
@@ -638,6 +745,39 @@ class TripoConversionNode(IO.ComfyNode):
             ],
             is_api_node=True,
             is_output_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(
+                    widgets=[
+                        "quad",
+                        "face_limit",
+                        "texture_size",
+                        "texture_format",
+                        "flatten_bottom",
+                        "flatten_bottom_threshold",
+                        "pivot_to_center_bottom",
+                        "scale_factor",
+                    ],
+                ),
+                expr="""
+                (
+                    $face := (widgets.face_limit != null) ? widgets.face_limit : -1;
+                    $texSize := (widgets.texture_size != null) ? widgets.texture_size : 4096;
+                    $flatThresh := (widgets.flatten_bottom_threshold != null) ? widgets.flatten_bottom_threshold : 0;
+                    $scale := (widgets.scale_factor != null) ? widgets.scale_factor : 1;
+                    $texFmt := (widgets.texture_format != "" ? widgets.texture_format : "jpeg");
+                    $advanced :=
+                      widgets.quad or
+                      widgets.flatten_bottom or
+                      widgets.pivot_to_center_bottom or
+                      ($face != -1) or
+                      ($texSize != 4096) or
+                      ($flatThresh != 0) or
+                      ($scale != 1) or
+                      ($texFmt != "jpeg");
+                    {"type":"usd","usd": ($advanced ? 0.1 : 0.05), "format": {"approximate": true}}
+                )
+                """,
+            ),
         )
 
     @classmethod

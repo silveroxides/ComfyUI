@@ -6,6 +6,7 @@ from PIL import Image
 import math
 from enum import Enum
 from typing import TypedDict, Literal
+import kornia
 
 import comfy.utils
 import comfy.model_management
@@ -19,7 +20,10 @@ class Blend(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="ImageBlend",
+            search_aliases=["mix images"],
+            display_name="Blend Images",
             category="image/postprocessing",
+            essentials_category="Image Tools",
             inputs=[
                 io.Image.Input("image1"),
                 io.Image.Input("image2"),
@@ -65,17 +69,18 @@ class Blend(io.ComfyNode):
     def g(cls, x):
         return torch.where(x <= 0.25, ((16 * x - 12) * x + 4) * x, torch.sqrt(x))
 
-def gaussian_kernel(kernel_size: int, sigma: float, device=None):
+def gaussian_kernel(kernel_size: int, sigma: float, device=None, dtype=torch.float32):
     x, y = torch.meshgrid(torch.linspace(-1, 1, kernel_size, device=device), torch.linspace(-1, 1, kernel_size, device=device), indexing="ij")
     d = torch.sqrt(x * x + y * y)
     g = torch.exp(-(d * d) / (2.0 * sigma * sigma))
-    return g / g.sum()
+    return (g / g.sum()).to(dtype)
 
 class Blur(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
             node_id="ImageBlur",
+            display_name="Image Blur",
             category="image/postprocessing",
             inputs=[
                 io.Image.Input("image"),
@@ -96,7 +101,7 @@ class Blur(io.ComfyNode):
         batch_size, height, width, channels = image.shape
 
         kernel_size = blur_radius * 2 + 1
-        kernel = gaussian_kernel(kernel_size, sigma, device=image.device).repeat(channels, 1, 1).unsqueeze(1)
+        kernel = gaussian_kernel(kernel_size, sigma, device=image.device, dtype=image.dtype).repeat(channels, 1, 1).unsqueeze(1)
 
         image = image.permute(0, 3, 1, 2) # Torch wants (B, C, H, W) we use (B, H, W, C)
         padded_image = F.pad(image, (blur_radius,blur_radius,blur_radius,blur_radius), 'reflect')
@@ -111,6 +116,7 @@ class Quantize(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="ImageQuantize",
+            display_name="Quantize Image",
             category="image/postprocessing",
             inputs=[
                 io.Image.Input("image"),
@@ -176,12 +182,13 @@ class Sharpen(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="ImageSharpen",
+            display_name="Sharpen Image",
             category="image/postprocessing",
             inputs=[
                 io.Image.Input("image"),
-                io.Int.Input("sharpen_radius", default=1, min=1, max=31, step=1),
-                io.Float.Input("sigma", default=1.0, min=0.1, max=10.0, step=0.01),
-                io.Float.Input("alpha", default=1.0, min=0.0, max=5.0, step=0.01),
+                io.Int.Input("sharpen_radius", default=1, min=1, max=31, step=1, advanced=True),
+                io.Float.Input("sigma", default=1.0, min=0.1, max=10.0, step=0.01, advanced=True),
+                io.Float.Input("alpha", default=1.0, min=0.0, max=5.0, step=0.01, advanced=True),
             ],
             outputs=[
                 io.Image.Output(),
@@ -197,7 +204,7 @@ class Sharpen(io.ComfyNode):
         image = image.to(comfy.model_management.get_torch_device())
 
         kernel_size = sharpen_radius * 2 + 1
-        kernel = gaussian_kernel(kernel_size, sigma, device=image.device) * -(alpha*10)
+        kernel = gaussian_kernel(kernel_size, sigma, device=image.device, dtype=image.dtype) * -(alpha*10)
         kernel = kernel.to(dtype=image.dtype)
         center = kernel_size // 2
         kernel[center, center] = kernel[center, center] - kernel.sum() + 1.0
@@ -220,12 +227,13 @@ class ImageScaleToTotalPixels(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="ImageScaleToTotalPixels",
+            display_name="Scale Image to Total Pixels",
             category="image/upscaling",
             inputs=[
                 io.Image.Input("image"),
                 io.Combo.Input("upscale_method", options=cls.upscale_methods),
                 io.Float.Input("megapixels", default=1.0, min=0.01, max=16.0, step=0.01),
-                io.Int.Input("resolution_steps", default=1, min=1, max=256),
+                io.Int.Input("resolution_steps", default=1, min=1, max=256, advanced=True),
             ],
             outputs=[
                 io.Image.Output(),
@@ -254,6 +262,7 @@ class ResizeType(str, Enum):
     SCALE_HEIGHT = "scale height"
     SCALE_TOTAL_PIXELS = "scale total pixels"
     MATCH_SIZE = "match size"
+    SCALE_TO_MULTIPLE = "scale to multiple"
 
 def is_image(input: torch.Tensor) -> bool:
     # images have 4 dimensions: [batch, height, width, channels]
@@ -328,7 +337,7 @@ def scale_shorter_dimension(input: torch.Tensor, shorter_size: int, scale_method
     if height < width:
         width = round((width / height) * shorter_size)
         height = shorter_size
-    elif width > height:
+    elif width < height:
         height = round((height / width) * shorter_size)
         width = shorter_size
     else:
@@ -363,8 +372,44 @@ def scale_match_size(input: torch.Tensor, match: torch.Tensor, scale_method: str
     input = finalize_image_mask_input(input, is_type_image)
     return input
 
-class ResizeImageMaskNode(io.ComfyNode):
+def scale_to_multiple_cover(input: torch.Tensor, multiple: int, scale_method: str) -> torch.Tensor:
+    if multiple <= 1:
+        return input
+    is_type_image = is_image(input)
+    if is_type_image:
+        _, height, width, _ = input.shape
+    else:
+        _, height, width = input.shape
+    target_w = (width // multiple) * multiple
+    target_h = (height // multiple) * multiple
+    if target_w == 0 or target_h == 0:
+        return input
+    if target_w == width and target_h == height:
+        return input
+    s_w = target_w / width
+    s_h = target_h / height
+    if s_w >= s_h:
+        scaled_w = target_w
+        scaled_h = int(math.ceil(height * s_w))
+        if scaled_h < target_h:
+            scaled_h = target_h
+    else:
+        scaled_h = target_h
+        scaled_w = int(math.ceil(width * s_h))
+        if scaled_w < target_w:
+            scaled_w = target_w
+    input = init_image_mask_input(input, is_type_image)
+    input = comfy.utils.common_upscale(input, scaled_w, scaled_h, scale_method, "disabled")
+    input = finalize_image_mask_input(input, is_type_image)
+    x0 = (scaled_w - target_w) // 2
+    y0 = (scaled_h - target_h) // 2
+    x1 = x0 + target_w
+    y1 = y0 + target_h
+    if is_type_image:
+        return input[:, y0:y1, x0:x1, :]
+    return input[:, y0:y1, x0:x1]
 
+class ResizeImageMaskNode(io.ComfyNode):
     scale_methods = ["nearest-exact", "bilinear", "area", "bicubic", "lanczos"]
     crop_methods = ["disabled", "center"]
 
@@ -378,47 +423,67 @@ class ResizeImageMaskNode(io.ComfyNode):
         longer_size: int
         shorter_size: int
         megapixels: float
+        multiple: int
 
     @classmethod
     def define_schema(cls):
         template = io.MatchType.Template("input_type", [io.Image, io.Mask])
-        crop_combo = io.Combo.Input("crop", options=cls.crop_methods, default="center")
+        crop_combo = io.Combo.Input(
+            "crop",
+            options=cls.crop_methods,
+            default="center",
+            tooltip="How to handle aspect ratio mismatch: 'disabled' stretches to fit, 'center' crops to maintain aspect ratio.",
+        )
         return io.Schema(
             node_id="ResizeImageMaskNode",
             display_name="Resize Image/Mask",
-            category="transform",
+            description="Resize an image or mask using various scaling methods.",
+            category="image/transform",
+            search_aliases=["resize", "resize image", "resize mask", "scale", "scale image", "scale mask", "image resize", "change size", "dimensions", "shrink", "enlarge"],
             inputs=[
                 io.MatchType.Input("input", template=template),
-                io.DynamicCombo.Input("resize_type", options=[
-                    io.DynamicCombo.Option(ResizeType.SCALE_BY, [
-                        io.Float.Input("multiplier", default=1.00, min=0.01, max=8.0, step=0.01),
+                io.DynamicCombo.Input(
+                    "resize_type",
+                    tooltip="Select how to resize: by exact dimensions, scale factor, matching another image, etc.",
+                    options=[
+                        io.DynamicCombo.Option(ResizeType.SCALE_DIMENSIONS, [
+                            io.Int.Input("width", default=512, min=0, max=MAX_RESOLUTION, step=1, tooltip="Target width in pixels. Set to 0 to auto-calculate from height while preserving aspect ratio."),
+                            io.Int.Input("height", default=512, min=0, max=MAX_RESOLUTION, step=1, tooltip="Target height in pixels. Set to 0 to auto-calculate from width while preserving aspect ratio."),
+                            crop_combo,
                         ]),
-                    io.DynamicCombo.Option(ResizeType.SCALE_DIMENSIONS, [
-                        io.Int.Input("width", default=512, min=0, max=MAX_RESOLUTION, step=1),
-                        io.Int.Input("height", default=512, min=0, max=MAX_RESOLUTION, step=1),
-                        crop_combo,
+                        io.DynamicCombo.Option(ResizeType.SCALE_BY, [
+                            io.Float.Input("multiplier", default=1.00, min=0.01, max=8.0, step=0.01, tooltip="Scale factor (e.g., 2.0 doubles size, 0.5 halves size)."),
                         ]),
-                    io.DynamicCombo.Option(ResizeType.SCALE_LONGER_DIMENSION, [
-                        io.Int.Input("longer_size", default=512, min=0, max=MAX_RESOLUTION, step=1),
+                        io.DynamicCombo.Option(ResizeType.SCALE_LONGER_DIMENSION, [
+                            io.Int.Input("longer_size", default=512, min=0, max=MAX_RESOLUTION, step=1, tooltip="The longer edge will be resized to this value. Aspect ratio is preserved."),
                         ]),
-                    io.DynamicCombo.Option(ResizeType.SCALE_SHORTER_DIMENSION, [
-                        io.Int.Input("shorter_size", default=512, min=0, max=MAX_RESOLUTION, step=1),
+                        io.DynamicCombo.Option(ResizeType.SCALE_SHORTER_DIMENSION, [
+                            io.Int.Input("shorter_size", default=512, min=0, max=MAX_RESOLUTION, step=1, tooltip="The shorter edge will be resized to this value. Aspect ratio is preserved."),
                         ]),
-                    io.DynamicCombo.Option(ResizeType.SCALE_WIDTH, [
-                        io.Int.Input("width", default=512, min=0, max=MAX_RESOLUTION, step=1),
+                        io.DynamicCombo.Option(ResizeType.SCALE_WIDTH, [
+                            io.Int.Input("width", default=512, min=0, max=MAX_RESOLUTION, step=1, tooltip="Target width in pixels. Height auto-adjusts to preserve aspect ratio."),
                         ]),
-                    io.DynamicCombo.Option(ResizeType.SCALE_HEIGHT, [
-                        io.Int.Input("height", default=512, min=0, max=MAX_RESOLUTION, step=1),
+                        io.DynamicCombo.Option(ResizeType.SCALE_HEIGHT, [
+                            io.Int.Input("height", default=512, min=0, max=MAX_RESOLUTION, step=1, tooltip="Target height in pixels. Width auto-adjusts to preserve aspect ratio."),
                         ]),
-                    io.DynamicCombo.Option(ResizeType.SCALE_TOTAL_PIXELS, [
-                        io.Float.Input("megapixels", default=1.0, min=0.01, max=16.0, step=0.01),
+                        io.DynamicCombo.Option(ResizeType.SCALE_TOTAL_PIXELS, [
+                            io.Float.Input("megapixels", default=1.0, min=0.01, max=16.0, step=0.01, tooltip="Target total megapixels (e.g., 1.0 ≈ 1024×1024). Aspect ratio is preserved."),
                         ]),
-                    io.DynamicCombo.Option(ResizeType.MATCH_SIZE, [
-                        io.MultiType.Input("match", [io.Image, io.Mask]),
-                        crop_combo,
+                        io.DynamicCombo.Option(ResizeType.MATCH_SIZE, [
+                            io.MultiType.Input("match", [io.Image, io.Mask], tooltip="Resize input to match the dimensions of this reference image or mask."),
+                            crop_combo,
                         ]),
-                ]),
-                io.Combo.Input("scale_method", options=cls.scale_methods, default="area"),
+                        io.DynamicCombo.Option(ResizeType.SCALE_TO_MULTIPLE, [
+                            io.Int.Input("multiple", default=8, min=1, max=MAX_RESOLUTION, step=1, tooltip="Resize so width and height are divisible by this number. Useful for latent alignment (e.g., 8 or 64)."),
+                        ]),
+                    ],
+                ),
+                io.Combo.Input(
+                    "scale_method",
+                    options=cls.scale_methods,
+                    default="area",
+                    tooltip="Interpolation algorithm. 'area' is best for downscaling, 'lanczos' for upscaling, 'nearest-exact' for pixel art.",
+                ),
             ],
             outputs=[io.MatchType.Output(template=template, display_name="resized")]
         )
@@ -442,6 +507,8 @@ class ResizeImageMaskNode(io.ComfyNode):
             return io.NodeOutput(scale_total_pixels(input, resize_type["megapixels"], scale_method))
         elif selected_type == ResizeType.MATCH_SIZE:
             return io.NodeOutput(scale_match_size(input, resize_type["match"], scale_method, resize_type["crop"]))
+        elif selected_type == ResizeType.SCALE_TO_MULTIPLE:
+            return io.NodeOutput(scale_to_multiple_cover(input, resize_type["multiple"], scale_method))
         raise ValueError(f"Unsupported resize type: {selected_type}")
 
 def batch_images(images: list[torch.Tensor]) -> torch.Tensor | None:
@@ -505,7 +572,9 @@ class BatchImagesNode(io.ComfyNode):
         return io.Schema(
             node_id="BatchImagesNode",
             display_name="Batch Images",
-            category="image",
+            category="image/batch",
+            essentials_category="Image Tools",
+            search_aliases=["batch", "image batch", "batch images", "combine images", "merge images", "stack images"],
             inputs=[
                 io.Autogrow.Input("images", template=autogrow_template)
             ],
@@ -524,6 +593,7 @@ class BatchMasksNode(io.ComfyNode):
         autogrow_template = io.Autogrow.TemplatePrefix(io.Mask.Input("mask"), prefix="mask", min=2, max=50)
         return io.Schema(
             node_id="BatchMasksNode",
+            search_aliases=["combine masks", "stack masks", "merge masks"],
             display_name="Batch Masks",
             category="mask",
             inputs=[
@@ -544,6 +614,7 @@ class BatchLatentsNode(io.ComfyNode):
         autogrow_template = io.Autogrow.TemplatePrefix(io.Latent.Input("latent"), prefix="latent", min=2, max=50)
         return io.Schema(
             node_id="BatchLatentsNode",
+            search_aliases=["combine latents", "stack latents", "merge latents"],
             display_name="Batch Latents",
             category="latent",
             inputs=[
@@ -567,6 +638,7 @@ class BatchImagesMasksLatentsNode(io.ComfyNode):
                 prefix="input", min=1, max=50)
         return io.Schema(
             node_id="BatchImagesMasksLatentsNode",
+            search_aliases=["combine batch", "merge batch", "stack inputs"],
             display_name="Batch Images/Masks/Latents",
             category="util",
             inputs=[
@@ -592,6 +664,230 @@ class BatchImagesMasksLatentsNode(io.ComfyNode):
             batched = batch_masks(values)
         return io.NodeOutput(batched)
 
+
+class ColorTransfer(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ColorTransfer",
+            display_name="Color Transfer",
+            category="image/postprocessing",
+            description="Match the colors of one image to another using various algorithms.",
+            search_aliases=["color match", "color grading", "color correction", "match colors", "color transform", "mkl", "reinhard", "histogram"],
+            inputs=[
+                io.Image.Input("image_target", tooltip="Image(s) to apply the color transform to."),
+                io.Image.Input("image_ref", tooltip="Reference image(s) to match colors to."),
+                io.Combo.Input("method", options=['reinhard_lab', 'mkl_lab', 'histogram'],),
+                io.DynamicCombo.Input("source_stats",
+                    tooltip="per_frame: each frame matched to image_ref individually. uniform: pool stats across all source frames as baseline, match to image_ref. target_frame: use one chosen frame as the baseline for the transform to image_ref, applied uniformly to all frames (preserves relative differences)",
+                    options=[
+                        io.DynamicCombo.Option("per_frame", []),
+                        io.DynamicCombo.Option("uniform", []),
+                        io.DynamicCombo.Option("target_frame", [
+                            io.Int.Input("target_index", default=0, min=0, max=10000,
+                                tooltip="Frame index used as the source baseline for computing the transform to image_ref"),
+                        ]),
+                    ]),
+                io.Float.Input("strength", default=1.0, min=0.0, max=10.0, step=0.01),
+            ],
+            outputs=[
+                io.Image.Output(display_name="image"),
+            ],
+        )
+
+    @staticmethod
+    def _to_lab(images, i, device):
+        return kornia.color.rgb_to_lab(
+            images[i:i+1].to(device, dtype=torch.float32).permute(0, 3, 1, 2))
+
+    @staticmethod
+    def _pool_stats(images, device, is_reinhard, eps):
+        """Two-pass pooled mean + std/cov across all frames."""
+        N, C = images.shape[0], images.shape[3]
+        HW = images.shape[1] * images.shape[2]
+        mean = torch.zeros(C, 1, device=device, dtype=torch.float32)
+        for i in range(N):
+            mean += ColorTransfer._to_lab(images, i, device).view(C, -1).mean(dim=-1, keepdim=True)
+        mean /= N
+        acc = torch.zeros(C, 1 if is_reinhard else C, device=device, dtype=torch.float32)
+        for i in range(N):
+            centered = ColorTransfer._to_lab(images, i, device).view(C, -1) - mean
+            if is_reinhard:
+                acc += (centered * centered).mean(dim=-1, keepdim=True)
+            else:
+                acc += centered @ centered.T / HW
+        if is_reinhard:
+            return mean, torch.sqrt(acc / N).clamp_min_(eps)
+        return mean, acc / N
+
+    @staticmethod
+    def _frame_stats(lab_flat, hw, is_reinhard, eps):
+        """Per-frame mean + std/cov."""
+        mean = lab_flat.mean(dim=-1, keepdim=True)
+        if is_reinhard:
+            return mean, lab_flat.std(dim=-1, keepdim=True, unbiased=False).clamp_min_(eps)
+        centered = lab_flat - mean
+        return mean, centered @ centered.T / hw
+
+    @staticmethod
+    def _mkl_matrix(cov_s, cov_r, eps):
+        """Compute MKL 3x3 transform matrix from source and ref covariances."""
+        eig_val_s, eig_vec_s = torch.linalg.eigh(cov_s)
+        sqrt_val_s = torch.sqrt(eig_val_s.clamp_min(0)).clamp_min_(eps)
+
+        scaled_V = eig_vec_s * sqrt_val_s.unsqueeze(0)
+        mid = scaled_V.T @ cov_r @ scaled_V
+        eig_val_m, eig_vec_m = torch.linalg.eigh(mid)
+        sqrt_m = torch.sqrt(eig_val_m.clamp_min(0))
+
+        inv_sqrt_s = 1.0 / sqrt_val_s
+        inv_scaled_V = eig_vec_s * inv_sqrt_s.unsqueeze(0)
+        M_half = (eig_vec_m * sqrt_m.unsqueeze(0)) @ eig_vec_m.T
+        return inv_scaled_V @ M_half @ inv_scaled_V.T
+
+    @staticmethod
+    def _histogram_lut(src, ref, bins=256):
+        """Build per-channel LUT from source and ref histograms. src/ref: (C, HW) in [0,1]."""
+        s_bins = (src * (bins - 1)).long().clamp(0, bins - 1)
+        r_bins = (ref * (bins - 1)).long().clamp(0, bins - 1)
+        s_hist = torch.zeros(src.shape[0], bins, device=src.device, dtype=src.dtype)
+        r_hist = torch.zeros(src.shape[0], bins, device=src.device, dtype=src.dtype)
+        ones_s = torch.ones_like(src)
+        ones_r = torch.ones_like(ref)
+        s_hist.scatter_add_(1, s_bins, ones_s)
+        r_hist.scatter_add_(1, r_bins, ones_r)
+        s_cdf = s_hist.cumsum(1)
+        s_cdf = s_cdf / s_cdf[:, -1:]
+        r_cdf = r_hist.cumsum(1)
+        r_cdf = r_cdf / r_cdf[:, -1:]
+        return torch.searchsorted(r_cdf, s_cdf).clamp_max_(bins - 1).float() / (bins - 1)
+
+    @classmethod
+    def _pooled_cdf(cls, images, device, num_bins=256):
+        """Build pooled CDF across all frames, one frame at a time."""
+        C = images.shape[3]
+        hist = torch.zeros(C, num_bins, device=device, dtype=torch.float32)
+        for i in range(images.shape[0]):
+            frame = images[i].to(device, dtype=torch.float32).permute(2, 0, 1).reshape(C, -1)
+            bins = (frame * (num_bins - 1)).long().clamp(0, num_bins - 1)
+            hist.scatter_add_(1, bins, torch.ones_like(frame))
+        cdf = hist.cumsum(1)
+        return cdf / cdf[:, -1:]
+
+    @classmethod
+    def _build_histogram_transform(cls, image_target, image_ref, device, stats_mode, target_index, B):
+        """Build per-frame or uniform LUT transform for histogram mode."""
+        if stats_mode == 'per_frame':
+            return None  # LUT computed per-frame in the apply loop
+
+        r_cdf = cls._pooled_cdf(image_ref, device)
+        if stats_mode == 'target_frame':
+            ti = min(target_index, B - 1)
+            s_cdf = cls._pooled_cdf(image_target[ti:ti+1], device)
+        else:
+            s_cdf = cls._pooled_cdf(image_target, device)
+        return torch.searchsorted(r_cdf, s_cdf).clamp_max_(255).float() / 255.0
+
+    @classmethod
+    def _build_lab_transform(cls, image_target, image_ref, device, stats_mode, target_index, is_reinhard):
+        """Build transform parameters for Lab-based methods. Returns a transform function."""
+        eps = 1e-6
+        B, H, W, C = image_target.shape
+        B_ref = image_ref.shape[0]
+        single_ref = B_ref == 1
+        HW = H * W
+        HW_ref = image_ref.shape[1] * image_ref.shape[2]
+
+        # Precompute ref stats
+        if single_ref or stats_mode in ('uniform', 'target_frame'):
+            ref_mean, ref_sc = cls._pool_stats(image_ref, device, is_reinhard, eps)
+
+        # Uniform/target_frame: precompute single affine transform
+        if stats_mode in ('uniform', 'target_frame'):
+            if stats_mode == 'target_frame':
+                ti = min(target_index, B - 1)
+                s_lab = cls._to_lab(image_target, ti, device).view(C, -1)
+                s_mean, s_sc = cls._frame_stats(s_lab, HW, is_reinhard, eps)
+            else:
+                s_mean, s_sc = cls._pool_stats(image_target, device, is_reinhard, eps)
+
+            if is_reinhard:
+                scale = ref_sc / s_sc
+                offset = ref_mean - scale * s_mean
+                return lambda src_flat, **_: src_flat * scale + offset
+            T = cls._mkl_matrix(s_sc, ref_sc, eps)
+            offset = ref_mean - T @ s_mean
+            return lambda src_flat, **_: T @ src_flat + offset
+
+        # per_frame
+        def per_frame_transform(src_flat, frame_idx):
+            s_mean, s_sc = cls._frame_stats(src_flat, HW, is_reinhard, eps)
+
+            if single_ref:
+                r_mean, r_sc = ref_mean, ref_sc
+            else:
+                ri = min(frame_idx, B_ref - 1)
+                r_mean, r_sc = cls._frame_stats(cls._to_lab(image_ref, ri, device).view(C, -1), HW_ref, is_reinhard, eps)
+
+            centered = src_flat - s_mean
+            if is_reinhard:
+                return centered * (r_sc / s_sc) + r_mean
+            T = cls._mkl_matrix(centered @ centered.T / HW, r_sc, eps)
+            return T @ centered + r_mean
+
+        return per_frame_transform
+
+    @classmethod
+    def execute(cls, image_target, image_ref, method, source_stats, strength=1.0) -> io.NodeOutput:
+        stats_mode = source_stats["source_stats"]
+        target_index = source_stats.get("target_index", 0)
+
+        if strength == 0 or image_ref is None:
+            return io.NodeOutput(image_target)
+
+        device = comfy.model_management.get_torch_device()
+        intermediate_device = comfy.model_management.intermediate_device()
+        intermediate_dtype = comfy.model_management.intermediate_dtype()
+
+        B, H, W, C = image_target.shape
+        B_ref = image_ref.shape[0]
+        pbar = comfy.utils.ProgressBar(B)
+        out = torch.empty(B, H, W, C, device=intermediate_device, dtype=intermediate_dtype)
+
+        if method == 'histogram':
+            uniform_lut = cls._build_histogram_transform(
+                image_target, image_ref, device, stats_mode, target_index, B)
+
+            for i in range(B):
+                src = image_target[i].to(device, dtype=torch.float32).permute(2, 0, 1)
+                src_flat = src.reshape(C, -1)
+                if uniform_lut is not None:
+                    lut = uniform_lut
+                else:
+                    ri = min(i, B_ref - 1)
+                    ref = image_ref[ri].to(device, dtype=torch.float32).permute(2, 0, 1).reshape(C, -1)
+                    lut = cls._histogram_lut(src_flat, ref)
+                bin_idx = (src_flat * 255).long().clamp(0, 255)
+                matched = lut.gather(1, bin_idx).view(C, H, W)
+                result = matched if strength == 1.0 else torch.lerp(src, matched, strength)
+                out[i] = result.permute(1, 2, 0).clamp_(0, 1).to(device=intermediate_device, dtype=intermediate_dtype)
+                pbar.update(1)
+        else:
+            transform = cls._build_lab_transform(image_target, image_ref, device, stats_mode, target_index, is_reinhard=method == "reinhard_lab")
+
+            for i in range(B):
+                src_frame = cls._to_lab(image_target, i, device)
+                corrected = transform(src_frame.view(C, -1), frame_idx=i)
+                if strength == 1.0:
+                    result = kornia.color.lab_to_rgb(corrected.view(1, C, H, W))
+                else:
+                    result = kornia.color.lab_to_rgb(torch.lerp(src_frame, corrected.view(1, C, H, W), strength))
+                out[i] = result.squeeze(0).permute(1, 2, 0).clamp_(0, 1).to(device=intermediate_device, dtype=intermediate_dtype)
+                pbar.update(1)
+
+        return io.NodeOutput(out)
+
+
 class PostProcessingExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -605,6 +901,7 @@ class PostProcessingExtension(ComfyExtension):
             BatchImagesNode,
             BatchMasksNode,
             BatchLatentsNode,
+            ColorTransfer,
             # BatchImagesMasksLatentsNode,
         ]
 

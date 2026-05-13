@@ -2,6 +2,7 @@ import numpy as np
 import scipy.ndimage
 import torch
 import comfy.utils
+import comfy.model_management
 import node_helpers
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, IO, UI
@@ -45,11 +46,13 @@ def composite(destination, source, x, y, mask = None, multiplier = 8, resize_sou
     destination[..., top:bottom, left:right] = source_portion + destination_portion
     return destination
 
+
 class LatentCompositeMasked(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
         return IO.Schema(
             node_id="LatentCompositeMasked",
+            search_aliases=["overlay latent", "layer latent", "paste latent", "inpaint latent"],
             category="latent",
             inputs=[
                 IO.Latent.Input("destination"),
@@ -78,6 +81,8 @@ class ImageCompositeMasked(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="ImageCompositeMasked",
+            search_aliases=["overlay", "layer", "paste image", "images composition"],
+            display_name="Image Composite Masked",
             category="image",
             inputs=[
                 IO.Image.Input("destination"),
@@ -105,6 +110,7 @@ class MaskToImage(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="MaskToImage",
+            search_aliases=["convert mask"],
             display_name="Convert Mask to Image",
             category="mask",
             inputs=[
@@ -126,6 +132,7 @@ class ImageToMask(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="ImageToMask",
+            search_aliases=["extract channel", "channel to mask"],
             display_name="Convert Image to Mask",
             category="mask",
             inputs=[
@@ -149,6 +156,7 @@ class ImageColorToMask(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="ImageColorToMask",
+            search_aliases=["color keying", "chroma key"],
             category="mask",
             inputs=[
                 IO.Image.Input("image"),
@@ -183,7 +191,7 @@ class SolidMask(IO.ComfyNode):
 
     @classmethod
     def execute(cls, value, width, height) -> IO.NodeOutput:
-        out = torch.full((1, height, width), value, dtype=torch.float32, device="cpu")
+        out = torch.full((1, height, width), value, dtype=torch.float32, device=comfy.model_management.intermediate_device())
         return IO.NodeOutput(out)
 
     solid = execute  # TODO: remove
@@ -194,6 +202,8 @@ class InvertMask(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="InvertMask",
+            search_aliases=["reverse mask", "flip mask"],
+            display_name="Invert Mask",
             category="mask",
             inputs=[
                 IO.Mask.Input("mask"),
@@ -214,6 +224,8 @@ class CropMask(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="CropMask",
+            search_aliases=["cut mask", "extract mask region", "mask slice"],
+            display_name="Crop Mask",
             category="mask",
             inputs=[
                 IO.Mask.Input("mask"),
@@ -239,6 +251,8 @@ class MaskComposite(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="MaskComposite",
+            search_aliases=["combine masks", "blend masks", "layer masks", "masks composition"],
+            display_name="Combine Masks",
             category="mask",
             inputs=[
                 IO.Mask.Input("destination"),
@@ -254,6 +268,7 @@ class MaskComposite(IO.ComfyNode):
     def execute(cls, destination, source, x, y, operation) -> IO.NodeOutput:
         output = destination.reshape((-1, destination.shape[-2], destination.shape[-1])).clone()
         source = source.reshape((-1, source.shape[-2], source.shape[-1]))
+        source = source.to(output.device)
 
         left, top = (x, y,)
         right, bottom = (min(left + source.shape[-1], destination.shape[-1]), min(top + source.shape[-2], destination.shape[-2]))
@@ -287,6 +302,8 @@ class FeatherMask(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="FeatherMask",
+            search_aliases=["soft edge mask", "blur mask edges", "gradient mask edge"],
+            display_name="Feather Mask",
             category="mask",
             inputs=[
                 IO.Mask.Input("mask"),
@@ -333,12 +350,13 @@ class GrowMask(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="GrowMask",
+            search_aliases=["expand mask", "shrink mask"],
             display_name="Grow Mask",
             category="mask",
             inputs=[
                 IO.Mask.Input("mask"),
                 IO.Int.Input("expand", default=0, min=-nodes.MAX_RESOLUTION, max=nodes.MAX_RESOLUTION, step=1),
-                IO.Boolean.Input("tapered_corners", default=True),
+                IO.Boolean.Input("tapered_corners", default=True, advanced=True),
             ],
             outputs=[IO.Mask.Output()],
         )
@@ -364,12 +382,12 @@ class GrowMask(IO.ComfyNode):
 
     expand_mask = execute  # TODO: remove
 
-
 class ThresholdMask(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
         return IO.Schema(
             node_id="ThresholdMask",
+            search_aliases=["binary mask"],
             category="mask",
             inputs=[
                 IO.Mask.Input("mask"),
@@ -394,6 +412,7 @@ class MaskPreview(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="MaskPreview",
+            search_aliases=["show mask", "view mask", "inspect mask", "debug mask"],
             display_name="Preview Mask",
             category="mask",
             description="Saves the input images to your ComfyUI output directory.",

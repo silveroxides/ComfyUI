@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from typing_extensions import override
 
 from comfy_api.latest import IO, ComfyExtension, Input
-from comfy_api_nodes.apis.bfl_api import (
+from comfy_api_nodes.apis.bfl import (
     BFLFluxExpandImageRequest,
     BFLFluxFillImageRequest,
     BFLFluxKontextProGenerateRequest,
@@ -57,6 +57,7 @@ class FluxProUltraImageNode(IO.ComfyNode):
                     tooltip="Whether to perform upsampling on the prompt. "
                     "If active, automatically modifies the prompt for more creative generation, "
                     "but results are nondeterministic (same seed will not produce exactly the same result).",
+                    advanced=True,
                 ),
                 IO.Int.Input(
                     "seed",
@@ -97,6 +98,9 @@ class FluxProUltraImageNode(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
+            price_badge=IO.PriceBadge(
+                expr="""{"type":"usd","usd":0.06}""",
+            ),
         )
 
     @classmethod
@@ -197,6 +201,7 @@ class FluxKontextProImageNode(IO.ComfyNode):
                     "prompt_upsampling",
                     default=False,
                     tooltip="Whether to perform upsampling on the prompt. If active, automatically modifies the prompt for more creative generation, but results are nondeterministic (same seed will not produce exactly the same result).",
+                    advanced=True,
                 ),
                 IO.Image.Input(
                     "input_image",
@@ -293,6 +298,7 @@ class FluxProExpandNode(IO.ComfyNode):
                     tooltip="Whether to perform upsampling on the prompt. "
                     "If active, automatically modifies the prompt for more creative generation, "
                     "but results are nondeterministic (same seed will not produce exactly the same result).",
+                    advanced=True,
                 ),
                 IO.Int.Input(
                     "top",
@@ -352,6 +358,9 @@ class FluxProExpandNode(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
+            price_badge=IO.PriceBadge(
+                expr="""{"type":"usd","usd":0.05}""",
+            ),
         )
 
     @classmethod
@@ -427,6 +436,7 @@ class FluxProFillNode(IO.ComfyNode):
                     tooltip="Whether to perform upsampling on the prompt. "
                     "If active, automatically modifies the prompt for more creative generation, "
                     "but results are nondeterministic (same seed will not produce exactly the same result).",
+                    advanced=True,
                 ),
                 IO.Float.Input(
                     "guidance",
@@ -458,6 +468,9 @@ class FluxProFillNode(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
+            price_badge=IO.PriceBadge(
+                expr="""{"type":"usd","usd":0.05}""",
+            ),
         )
 
     @classmethod
@@ -511,6 +524,21 @@ class Flux2ProImageNode(IO.ComfyNode):
     NODE_ID = "Flux2ProImageNode"
     DISPLAY_NAME = "Flux.2 [pro] Image"
     API_ENDPOINT = "/proxy/bfl/flux-2-pro/generate"
+    PRICE_BADGE_EXPR = """
+    (
+      $MP := 1024 * 1024;
+      $outMP := $max([1, $floor(((widgets.width * widgets.height) + $MP - 1) / $MP)]);
+      $outputCost := 0.03 + 0.015 * ($outMP - 1);
+      inputs.images.connected
+        ? {
+            "type":"range_usd",
+            "min_usd": $outputCost + 0.015,
+            "max_usd": $outputCost + 0.12,
+            "format": { "approximate": true }
+          }
+        : {"type":"usd","usd": $outputCost}
+    )
+    """
 
     @classmethod
     def define_schema(cls) -> IO.Schema:
@@ -553,6 +581,7 @@ class Flux2ProImageNode(IO.ComfyNode):
                     default=True,
                     tooltip="Whether to perform upsampling on the prompt. "
                     "If active, automatically modifies the prompt for more creative generation.",
+                    advanced=True,
                 ),
                 IO.Image.Input("images", optional=True, tooltip="Up to 9 images to be used as references."),
             ],
@@ -563,6 +592,11 @@ class Flux2ProImageNode(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["width", "height"], inputs=["images"]),
+                expr=cls.PRICE_BADGE_EXPR,
+            ),
+            is_deprecated=True,
         )
 
     @classmethod
@@ -623,6 +657,191 @@ class Flux2MaxImageNode(Flux2ProImageNode):
     NODE_ID = "Flux2MaxImageNode"
     DISPLAY_NAME = "Flux.2 [max] Image"
     API_ENDPOINT = "/proxy/bfl/flux-2-max/generate"
+    PRICE_BADGE_EXPR = """
+    (
+      $MP := 1024 * 1024;
+      $outMP := $max([1, $floor(((widgets.width * widgets.height) + $MP - 1) / $MP)]);
+      $outputCost := 0.07 + 0.03 * ($outMP - 1);
+
+      inputs.images.connected
+        ? {
+            "type":"range_usd",
+            "min_usd": $outputCost + 0.03,
+            "max_usd": $outputCost + 0.24,
+            "format": { "approximate": true }
+          }
+        : {"type":"usd","usd": $outputCost}
+    )
+    """
+
+
+_FLUX2_MODEL_ENDPOINTS = {
+    "Flux.2 [pro]": "/proxy/bfl/flux-2-pro/generate",
+    "Flux.2 [max]": "/proxy/bfl/flux-2-max/generate",
+}
+
+
+def _flux2_model_inputs():
+    return [
+        IO.Int.Input(
+            "width",
+            default=1024,
+            min=256,
+            max=2048,
+            step=32,
+        ),
+        IO.Int.Input(
+            "height",
+            default=768,
+            min=256,
+            max=2048,
+            step=32,
+        ),
+        IO.Autogrow.Input(
+            "images",
+            template=IO.Autogrow.TemplateNames(
+                IO.Image.Input("image"),
+                names=[f"image_{i}" for i in range(1, 9)],
+                min=0,
+            ),
+            tooltip="Optional reference image(s) for image-to-image generation. Up to 8 images.",
+        ),
+    ]
+
+
+class Flux2ImageNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="Flux2ImageNode",
+            display_name="Flux.2 Image",
+            category="api node/image/BFL",
+            description="Generate images via Flux.2 [pro] or Flux.2 [max] from a prompt and optional reference images.",
+            inputs=[
+                IO.String.Input(
+                    "prompt",
+                    multiline=True,
+                    default="",
+                    tooltip="Prompt for the image generation or edit",
+                ),
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option("Flux.2 [pro]", _flux2_model_inputs()),
+                        IO.DynamicCombo.Option("Flux.2 [max]", _flux2_model_inputs()),
+                    ],
+                ),
+                IO.Int.Input(
+                    "seed",
+                    default=0,
+                    min=0,
+                    max=0xFFFFFFFFFFFFFFFF,
+                    control_after_generate=True,
+                    tooltip="The random seed used for creating the noise.",
+                ),
+            ],
+            outputs=[IO.Image.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(
+                    widgets=["model", "model.width", "model.height"],
+                    input_groups=["model.images"],
+                ),
+                expr="""
+                (
+                  $isMax := widgets.model = "flux.2 [max]";
+                  $MP := 1024 * 1024;
+                  $w := $lookup(widgets, "model.width");
+                  $h := $lookup(widgets, "model.height");
+                  $outMP := $max([1, $floor((($w * $h) + $MP - 1) / $MP)]);
+                  $outputCost := $isMax
+                    ? (0.07 + 0.03 * ($outMP - 1))
+                    : (0.03 + 0.015 * ($outMP - 1));
+                  $refMin := $isMax ? 0.03 : 0.015;
+                  $refMax := $isMax ? 0.24 : 0.12;
+                  $hasRefs := $lookup(inputGroups, "model.images") > 0;
+                  $hasRefs
+                    ? {
+                        "type": "range_usd",
+                        "min_usd": $outputCost + $refMin,
+                        "max_usd": $outputCost + $refMax,
+                        "format": { "approximate": true }
+                      }
+                    : {"type": "usd", "usd": $outputCost}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        prompt: str,
+        model: dict,
+        seed: int,
+    ) -> IO.NodeOutput:
+        model_choice = model["model"]
+        endpoint = _FLUX2_MODEL_ENDPOINTS[model_choice]
+        width = model["width"]
+        height = model["height"]
+        images_dict = model.get("images") or {}
+
+        image_tensors: list[Input.Image] = [t for t in images_dict.values() if t is not None]
+        n_images = sum(get_number_of_images(t) for t in image_tensors)
+        if n_images > 8:
+            raise ValueError("The current maximum number of supported images is 8.")
+
+        flat_tensors: list[torch.Tensor] = []
+        for tensor in image_tensors:
+            if len(tensor.shape) == 4:
+                flat_tensors.extend(tensor[i] for i in range(tensor.shape[0]))
+            else:
+                flat_tensors.append(tensor)
+
+        reference_images: dict[str, str] = {}
+        for idx, tensor in enumerate(flat_tensors):
+            key_name = f"input_image_{idx + 1}" if idx else "input_image"
+            reference_images[key_name] = tensor_to_base64_string(tensor, total_pixels=2048 * 2048)
+
+        initial_response = await sync_op(
+            cls,
+            ApiEndpoint(path=endpoint, method="POST"),
+            response_model=BFLFluxProGenerateResponse,
+            data=Flux2ProGenerateRequest(
+                prompt=prompt,
+                width=width,
+                height=height,
+                seed=seed,
+                **reference_images,
+            ),
+        )
+
+        def price_extractor(_r: BaseModel) -> float | None:
+            return None if initial_response.cost is None else initial_response.cost / 100
+
+        response = await poll_op(
+            cls,
+            ApiEndpoint(initial_response.polling_url),
+            response_model=BFLFluxStatusResponse,
+            status_extractor=lambda r: r.status,
+            progress_extractor=lambda r: r.progress,
+            price_extractor=price_extractor,
+            completed_statuses=[BFLStatus.ready],
+            failed_statuses=[
+                BFLStatus.request_moderated,
+                BFLStatus.content_moderated,
+                BFLStatus.error,
+                BFLStatus.task_not_found,
+            ],
+            queued_statuses=[],
+        )
+        return IO.NodeOutput(await download_url_to_image_tensor(response.result["sample"]))
 
 
 class BFLExtension(ComfyExtension):
@@ -636,6 +855,7 @@ class BFLExtension(ComfyExtension):
             FluxProFillNode,
             Flux2ProImageNode,
             Flux2MaxImageNode,
+            Flux2ImageNode,
         ]
 
 
