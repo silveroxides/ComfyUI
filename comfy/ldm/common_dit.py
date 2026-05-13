@@ -16,7 +16,7 @@ def pad_to_patch_size(img, patch_size=(2, 2), padding_mode="circular"):
 
 rms_norm = comfy.rmsnorm.rms_norm
 
-def process_img(x, index=0, h_offset=0, w_offset=0, patch_size=2, transformer_options={}):
+def process_img(x, index=0, h_offset=0, w_offset=0, patch_size=2, transformer_options={}, num_axes=3):
     bs, c, h, w = x.shape
     x = pad_to_patch_size(x, (patch_size, patch_size))
 
@@ -39,7 +39,7 @@ def process_img(x, index=0, h_offset=0, w_offset=0, patch_size=2, transformer_op
         h_offset += rope_options.get("shift_y", 0.0)
         w_offset += rope_options.get("shift_x", 0.0)
 
-    img_ids = torch.zeros((steps_h, steps_w, 3), device=x.device, dtype=x.dtype)
+    img_ids = torch.zeros((steps_h, steps_w, num_axes), device=x.device, dtype=x.dtype)
     img_ids[:, :, 0] = img_ids[:, :, 1] + index
     img_ids[:, :, 1] = img_ids[:, :, 1] + torch.linspace(h_offset, h_len - 1 + h_offset, steps=steps_h, device=x.device, dtype=x.dtype).unsqueeze(1)
     img_ids[:, :, 2] = img_ids[:, :, 2] + torch.linspace(w_offset, w_len - 1 + w_offset, steps=steps_w, device=x.device, dtype=x.dtype).unsqueeze(0)
