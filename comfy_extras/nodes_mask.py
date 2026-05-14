@@ -46,6 +46,7 @@ def composite(destination, source, x, y, mask = None, multiplier = 8, resize_sou
     destination[..., top:bottom, left:right] = source_portion + destination_portion
     return destination
 
+
 class LatentCompositeMasked(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -380,7 +381,6 @@ class GrowMask(IO.ComfyNode):
         return IO.NodeOutput(torch.stack(out, dim=0))
 
     expand_mask = execute  # TODO: remove
-
 
 class ThresholdMask(IO.ComfyNode):
     @classmethod
