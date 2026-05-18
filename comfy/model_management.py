@@ -364,6 +364,7 @@ except:
 
 
 SUPPORT_FP8_OPS = args.supports_fp8_compute
+SUPPORT_INT8_OPS = args.supports_int8_compute
 
 AMD_RDNA2_AND_OLDER_ARCH = ["gfx1030", "gfx1031", "gfx1010", "gfx1011", "gfx1012", "gfx906", "gfx900", "gfx803"]
 AMD_ENABLE_MIOPEN_ENV = 'COMFYUI_ENABLE_MIOPEN'
@@ -1739,6 +1740,21 @@ def supports_mxfp8_compute(device=None):
         return False
 
     return True
+
+def supports_int8_compute(device=None):
+    if SUPPORT_INT8_OPS:
+        return True
+
+    if not is_nvidia():
+        return False
+
+    props = torch.cuda.get_device_properties(device)
+    if props.major >= 8:
+        return True
+    if props.major == 7 and props.minor >= 5:
+        return True
+
+    return False
 
 def supports_fp64(device=None):
     if is_device_mps(device):
