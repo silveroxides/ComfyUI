@@ -1068,15 +1068,27 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     layout_cls = get_layout_class(self.layout_type)
 
                     # Load format-specific parameters
-                    if self.quant_format in ["float8_e4m3fn", "float8_e5m2", "int8"]:
-                        # FP8/INT8: single tensor scale
+                    if self.quant_format in ["float8_e4m3fn", "float8_e5m2", "int8_tensorwise"]:
+                        # FP8/INT8: single tensor scale or per-channel
                         scale = self._load_scale_param(state_dict, prefix, "weight_scale", device, manually_loaded_keys)
+                        per_channel = scale is not None and scale.ndim > 0
 
                         params = layout_cls.Params(
                             scale=scale,
                             orig_dtype=MixedPrecisionOps._compute_dtype,
                             orig_shape=(self.out_features, self.in_features),
+                            is_weight=True,
                         )
+                        if self.quant_format == "int8_tensorwise":
+                            params = layout_cls.Params(
+                                scale=scale,
+                                orig_dtype=MixedPrecisionOps._compute_dtype,
+                                orig_shape=(self.out_features, self.in_features),
+                                is_weight=True,
+                            )
+                            # If INT8 scale is per-channel, it needs to be handled in layout
+                            if per_channel:
+                                setattr(params, 'per_channel', True)
 
                     elif self.quant_format == "mxfp8":
                         # MXFP8: E8M0 block scales stored as uint8 in safetensors
@@ -1245,7 +1257,13 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
             def set_weight(self, weight, inplace_update=False, seed=None, return_weight=False, **kwargs):
                 if getattr(self, 'layout_type', None) is not None:
                     # dtype is now implicit in the layout class
-                    weight = QuantizedTensor.from_float(weight, self.layout_type, scale="recalculate", stochastic_rounding=seed, inplace_ops=True).to(self.weight.dtype)
+                    q_kwargs = {"scale": "recalculate", "stochastic_rounding": seed, "inplace_ops": True}
+                    if self.quant_format == "int8_tensorwise" and isinstance(self.weight, QuantizedTensor):
+                        if getattr(self.weight._params, "is_weight", False) and getattr(self.weight._params, "scale", None) is not None:
+                             if self.weight._params.scale.ndim > 0:
+                                 q_kwargs["per_channel"] = True
+
+                    weight = QuantizedTensor.from_float(weight, self.layout_type, **q_kwargs).to(self.weight.dtype)
                 else:
                     weight = weight.to(self.weight.dtype)
                 if return_weight:
@@ -1378,7 +1396,7 @@ def pick_operations(weight_dtype, compute_dtype, load_device=None, disable_fast_
             disabled.add("float8_e4m3fn")
             disabled.add("float8_e5m2")
         if not int8_compute:
-            disabled.add("int8")
+            disabled.add("int8_tensorwise")
         logging.info("Native ops: {} {}".format(", ".join(QUANT_ALGOS.keys() - disabled), ", emulated ops: {}".format(", ".join(disabled)) if len(disabled) > 0 else ""))
         return mixed_precision_ops(model_config.quant_config, compute_dtype, disabled=disabled)
 

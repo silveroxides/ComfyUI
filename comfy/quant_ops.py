@@ -170,12 +170,18 @@ class TensorCoreNVFP4Layout(_CKNvfp4Layout):
 
 class TensorCoreINT8Layout(_CKInt8Layout):
     @classmethod
-    def quantize(cls, tensor, scale=None, stochastic_rounding=0, inplace_ops=False):
+    def quantize(cls, tensor, scale=None, stochastic_rounding=0, inplace_ops=False, **kwargs):
+        is_weight = kwargs.get("is_weight", True)
+        per_channel = kwargs.get("per_channel", False)
         orig_dtype = tensor.dtype
         orig_shape = tuple(tensor.shape)
 
         if scale is None or (isinstance(scale, str) and scale == "recalculate"):
-            scale = torch.amax(tensor.abs()).to(dtype=torch.float32) / 127.0
+            if is_weight and not per_channel:
+                scale = torch.amax(tensor.abs()).to(dtype=torch.float32) / 127.0
+            else:
+                scale = torch.amax(tensor.abs(), dim=-1, keepdim=True).to(dtype=torch.float32) / 127.0
+
             if tensor.dtype not in [torch.float32, torch.bfloat16]:
                 tensor_info = torch.finfo(tensor.dtype)
                 scale = (1.0 / torch.clamp((1.0 / scale), min=tensor_info.min, max=tensor_info.max))
@@ -192,11 +198,17 @@ class TensorCoreINT8Layout(_CKInt8Layout):
                 tensor = tensor * (1.0 / scale).to(tensor.dtype)
             qdata = comfy.float.stochastic_rounding(tensor, dtype=torch.int8, seed=stochastic_rounding)
         else:
-            from comfy_kitchen.backends.eager.quantization import quantize_int8_tensorwise
-            qdata, scale_out = quantize_int8_tensorwise(tensor)
+            if is_weight:
+                if per_channel:
+                    qdata, scale_out = torch.ops.comfy_kitchen.quantize_int8_rowwise(tensor)
+                else:
+                    from comfy_kitchen.backends.eager.quantization import quantize_int8_tensorwise
+                    qdata, scale_out = quantize_int8_tensorwise(tensor)
+            else:
+                qdata, scale_out = torch.ops.comfy_kitchen.quantize_int8_rowwise(tensor)
             scale = scale_out.float()
 
-        params = cls.Params(scale=scale, orig_dtype=orig_dtype, orig_shape=orig_shape, is_weight=True)
+        params = cls.Params(scale=scale, orig_dtype=orig_dtype, orig_shape=orig_shape, is_weight=is_weight)
         return qdata, params
 
 
@@ -241,7 +253,7 @@ QUANT_ALGOS = {
         "comfy_tensor_layout": "TensorCoreNVFP4Layout",
         "group_size": 16,
     },
-    "int8": {
+    "int8_tensorwise": {
         "storage_t": torch.int8,
         "parameters": {"weight_scale", "input_scale"},
         "comfy_tensor_layout": "TensorCoreINT8Layout",
