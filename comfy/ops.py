@@ -1183,7 +1183,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
 
             def forward_comfy_cast_weights(self, input, compute_dtype=None, want_requant=False):
                 is_quantized = isinstance(self.weight, QuantizedTensor)
-                cast_dtype = self.weight.dtype if is_quantized else None
+                cast_dtype = None if is_quantized else None
                 bias_dtype = input.dtype if is_quantized else None
                 weight, bias, offload_stream = cast_bias_weight(self, input, dtype=cast_dtype, bias_dtype=bias_dtype, offloadable=True, compute_dtype=compute_dtype, want_requant=want_requant)
                 x = self._forward(input, weight, bias)
