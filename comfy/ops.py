@@ -1068,10 +1068,19 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     layout_cls = get_layout_class(self.layout_type)
 
                     # Load format-specific parameters
-                    if self.quant_format in ["float8_e4m3fn", "float8_e5m2", "int8_tensorwise"]:
-                        # FP8/INT8: single tensor scale or per-channel
+                    if self.quant_format in ["float8_e4m3fn", "float8_e5m2"]:
+                        # FP8: single tensor scale
                         scale = self._load_scale_param(state_dict, prefix, "weight_scale", device, manually_loaded_keys)
-                        per_channel = scale is not None and scale.ndim > 0
+
+                        params = layout_cls.Params(
+                            scale=scale,
+                            orig_dtype=MixedPrecisionOps._compute_dtype,
+                            orig_shape=(self.out_features, self.in_features),
+                        )
+
+                    elif self.quant_format == "int8_tensorwise":
+                        # INT8: single tensor scale or per-channel
+                        scale = self._load_scale_param(state_dict, prefix, "weight_scale", device, manually_loaded_keys)
 
                         params = layout_cls.Params(
                             scale=scale,
@@ -1079,16 +1088,6 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                             orig_shape=(self.out_features, self.in_features),
                             is_weight=True,
                         )
-                        if self.quant_format == "int8_tensorwise":
-                            params = layout_cls.Params(
-                                scale=scale,
-                                orig_dtype=MixedPrecisionOps._compute_dtype,
-                                orig_shape=(self.out_features, self.in_features),
-                                is_weight=True,
-                            )
-                            # If INT8 scale is per-channel, it needs to be handled in layout
-                            if per_channel:
-                                setattr(params, 'per_channel', True)
 
                     elif self.quant_format == "mxfp8":
                         # MXFP8: E8M0 block scales stored as uint8 in safetensors
@@ -1183,7 +1182,10 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 return torch.nn.functional.linear(input, weight, bias)
 
             def forward_comfy_cast_weights(self, input, compute_dtype=None, want_requant=False):
-                weight, bias, offload_stream = cast_bias_weight(self, input, offloadable=True, compute_dtype=compute_dtype, want_requant=want_requant)
+                is_quantized = isinstance(self.weight, QuantizedTensor)
+                cast_dtype = self.weight.dtype if is_quantized else None
+                bias_dtype = input.dtype if is_quantized else None
+                weight, bias, offload_stream = cast_bias_weight(self, input, dtype=cast_dtype, bias_dtype=bias_dtype, offloadable=True, compute_dtype=compute_dtype, want_requant=want_requant)
                 x = self._forward(input, weight, bias)
                 uncast_bias_weight(self, weight, bias, offload_stream)
                 return x
@@ -1297,7 +1299,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 if layer_conf is not None:
                     layer_conf = json.loads(layer_conf.numpy().tobytes())
 
-                # Only fp8 makes sense for embeddings (per-row dequant via index select).
+                # Only fp8/int8 makes sense for embeddings (per-row dequant via index select).
                 # Block-scaled formats (NVFP4, MXFP8) can't do per-row lookup efficiently.
                 quant_format = layer_conf.get("format", None) if layer_conf is not None else None
                 if quant_format in ["float8_e4m3fn", "float8_e5m2"] and weight_key in state_dict:
@@ -1318,6 +1320,34 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                         scale=scale if scale is not None else torch.ones((), dtype=torch.float32),
                         orig_dtype=MixedPrecisionOps._compute_dtype,
                         orig_shape=(self.num_embeddings, self.embedding_dim),
+                    )
+                    self.weight = torch.nn.Parameter(
+                        QuantizedTensor(weight.to(dtype=qconfig["storage_t"]), qconfig["comfy_tensor_layout"], params),
+                        requires_grad=False)
+
+                    super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+                    for k in manually_loaded_keys:
+                        if k in missing_keys:
+                            missing_keys.remove(k)
+                elif quant_format == "int8_tensorwise" and weight_key in state_dict:
+                    self.quant_format = quant_format
+                    qconfig = QUANT_ALGOS[quant_format]
+                    self.layout_type = qconfig["comfy_tensor_layout"]
+                    layout_cls = get_layout_class(self.layout_type)
+                    weight = state_dict.pop(weight_key)
+                    manually_loaded_keys = [weight_key]
+
+                    scale_key = f"{prefix}weight_scale"
+                    scale = state_dict.pop(scale_key, None)
+                    if scale is not None:
+                        scale = scale.float()
+                        manually_loaded_keys.append(scale_key)
+
+                    params = layout_cls.Params(
+                        scale=scale if scale is not None else torch.ones((), dtype=torch.float32),
+                        orig_dtype=MixedPrecisionOps._compute_dtype,
+                        orig_shape=(self.num_embeddings, self.embedding_dim),
+                        is_weight=True,
                     )
                     self.weight = torch.nn.Parameter(
                         QuantizedTensor(weight.to(dtype=qconfig["storage_t"]), qconfig["comfy_tensor_layout"], params),

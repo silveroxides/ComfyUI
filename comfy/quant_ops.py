@@ -182,9 +182,7 @@ class TensorCoreINT8Layout(_CKInt8Layout):
             else:
                 scale = torch.amax(tensor.abs(), dim=-1, keepdim=True).to(dtype=torch.float32) / 127.0
 
-            if tensor.dtype not in [torch.float32, torch.bfloat16]:
-                tensor_info = torch.finfo(tensor.dtype)
-                scale = (1.0 / torch.clamp((1.0 / scale), min=tensor_info.min, max=tensor_info.max))
+            scale = scale.clamp(min=1e-30)
 
         if scale is None:
             scale = torch.ones((), device=tensor.device, dtype=torch.float32)
