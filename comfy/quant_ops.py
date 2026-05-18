@@ -10,6 +10,7 @@ try:
         QuantizedLayout,
         TensorCoreFP8Layout as _CKFp8Layout,
         TensorCoreNVFP4Layout as _CKNvfp4Layout,
+        TensorWiseINT8Layout as _CKInt8Layout,
         register_layout_op,
         register_layout_class,
         get_layout_class,
@@ -45,6 +46,9 @@ except ImportError as e:
         pass
 
     class _CKNvfp4Layout:
+        pass
+
+    class _CKInt8Layout:
         pass
 
     def register_layout_class(name, cls):
@@ -164,6 +168,38 @@ class TensorCoreNVFP4Layout(_CKNvfp4Layout):
         return qdata, params
 
 
+class TensorCoreINT8Layout(_CKInt8Layout):
+    @classmethod
+    def quantize(cls, tensor, scale=None, stochastic_rounding=0, inplace_ops=False):
+        orig_dtype = tensor.dtype
+        orig_shape = tuple(tensor.shape)
+
+        if scale is None or (isinstance(scale, str) and scale == "recalculate"):
+            scale = torch.amax(tensor.abs()).to(dtype=torch.float32) / 127.0
+            if tensor.dtype not in [torch.float32, torch.bfloat16]:
+                tensor_info = torch.finfo(tensor.dtype)
+                scale = (1.0 / torch.clamp((1.0 / scale), min=tensor_info.min, max=tensor_info.max))
+
+        if scale is None:
+            scale = torch.ones((), device=tensor.device, dtype=torch.float32)
+        if not isinstance(scale, torch.Tensor):
+            scale = torch.tensor(scale, device=tensor.device, dtype=torch.float32)
+
+        if stochastic_rounding > 0:
+            if inplace_ops:
+                tensor *= (1.0 / scale).to(tensor.dtype)
+            else:
+                tensor = tensor * (1.0 / scale).to(tensor.dtype)
+            qdata = comfy.float.stochastic_rounding(tensor, dtype=torch.int8, seed=stochastic_rounding)
+        else:
+            from comfy_kitchen.backends.eager.quantization import quantize_int8_tensorwise
+            qdata, scale_out = quantize_int8_tensorwise(tensor)
+            scale = scale_out.float()
+
+        params = cls.Params(scale=scale, orig_dtype=orig_dtype, orig_shape=orig_shape, is_weight=True)
+        return qdata, params
+
+
 class TensorCoreFP8E4M3Layout(_TensorCoreFP8LayoutBase):
     FP8_DTYPE = torch.float8_e4m3fn
 
@@ -184,6 +220,7 @@ register_layout_class("TensorCoreFP8Layout", TensorCoreFP8Layout)
 register_layout_class("TensorCoreFP8E4M3Layout", TensorCoreFP8E4M3Layout)
 register_layout_class("TensorCoreFP8E5M2Layout", TensorCoreFP8E5M2Layout)
 register_layout_class("TensorCoreNVFP4Layout", TensorCoreNVFP4Layout)
+register_layout_class("TensorCoreINT8Layout", TensorCoreINT8Layout)
 if _CK_MXFP8_AVAILABLE:
     register_layout_class("TensorCoreMXFP8Layout", TensorCoreMXFP8Layout)
 
@@ -203,6 +240,11 @@ QUANT_ALGOS = {
         "parameters": {"weight_scale", "weight_scale_2", "input_scale"},
         "comfy_tensor_layout": "TensorCoreNVFP4Layout",
         "group_size": 16,
+    },
+    "int8": {
+        "storage_t": torch.int8,
+        "parameters": {"weight_scale", "input_scale"},
+        "comfy_tensor_layout": "TensorCoreINT8Layout",
     },
 }
 
@@ -226,6 +268,7 @@ __all__ = [
     "TensorCoreFP8E4M3Layout",
     "TensorCoreFP8E5M2Layout",
     "TensorCoreNVFP4Layout",
+    "TensorCoreINT8Layout",
     "QUANT_ALGOS",
     "register_layout_op",
 ]

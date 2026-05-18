@@ -1068,8 +1068,8 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     layout_cls = get_layout_class(self.layout_type)
 
                     # Load format-specific parameters
-                    if self.quant_format in ["float8_e4m3fn", "float8_e5m2"]:
-                        # FP8: single tensor scale
+                    if self.quant_format in ["float8_e4m3fn", "float8_e5m2", "int8"]:
+                        # FP8/INT8: single tensor scale
                         scale = self._load_scale_param(state_dict, prefix, "weight_scale", device, manually_loaded_keys)
 
                         params = layout_cls.Params(
@@ -1365,6 +1365,7 @@ def pick_operations(weight_dtype, compute_dtype, load_device=None, disable_fast_
     fp8_compute = comfy.model_management.supports_fp8_compute(load_device) # TODO: if we support more ops this needs to be more granular
     nvfp4_compute = comfy.model_management.supports_nvfp4_compute(load_device)
     mxfp8_compute = comfy.model_management.supports_mxfp8_compute(load_device)
+    int8_compute = comfy.model_management.supports_int8_compute(load_device)
 
     if model_config and hasattr(model_config, 'quant_config') and model_config.quant_config:
         logging.info("Using mixed precision operations")
@@ -1376,6 +1377,8 @@ def pick_operations(weight_dtype, compute_dtype, load_device=None, disable_fast_
         if not fp8_compute:
             disabled.add("float8_e4m3fn")
             disabled.add("float8_e5m2")
+        if not int8_compute:
+            disabled.add("int8")
         logging.info("Native ops: {} {}".format(", ".join(QUANT_ALGOS.keys() - disabled), ", emulated ops: {}".format(", ".join(disabled)) if len(disabled) > 0 else ""))
         return mixed_precision_ops(model_config.quant_config, compute_dtype, disabled=disabled)
 
