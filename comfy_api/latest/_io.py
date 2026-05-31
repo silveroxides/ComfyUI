@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 from comfy_api.internal import (_ComfyNodeInternal, _NodeOutputInternal, classproperty, copy_class, first_real_override, is_class,
     prune_dict, shallow_clone_class)
 from comfy_execution.graph_utils import ExecutionBlocker
-from ._util import MESH, VOXEL, SVG as _SVG, File3D
+from ._util import MESH, VOXEL, SPLAT, SVG as _SVG, File3D
 
 
 class FolderType(str, Enum):
@@ -684,6 +684,10 @@ class Voxel(ComfyTypeIO):
 class Mesh(ComfyTypeIO):
     Type = MESH
 
+@comfytype(io_type="SPLAT")
+class Splat(ComfyTypeIO):
+    Type = SPLAT
+
 
 @comfytype(io_type="FILE_3D")
 class File3DAny(ComfyTypeIO):
@@ -724,6 +728,30 @@ class File3DSTL(ComfyTypeIO):
 @comfytype(io_type="FILE_3D_USDZ")
 class File3DUSDZ(ComfyTypeIO):
     """USDZ format 3D file - Apple AR format."""
+    Type = File3D
+
+
+@comfytype(io_type="FILE_3D_PLY")
+class File3DPLY(ComfyTypeIO):
+    """PLY format 3D file - point cloud or Gaussian splat."""
+    Type = File3D
+
+
+@comfytype(io_type="FILE_3D_SPLAT")
+class File3DSPLAT(ComfyTypeIO):
+    """SPLAT format 3D file - 3D Gaussian splat."""
+    Type = File3D
+
+
+@comfytype(io_type="FILE_3D_SPZ")
+class File3DSPZ(ComfyTypeIO):
+    """SPZ format 3D file - compressed 3D Gaussian splat."""
+    Type = File3D
+
+
+@comfytype(io_type="FILE_3D_KSPLAT")
+class File3DKSPLAT(ComfyTypeIO):
+    """KSPLAT format 3D file - 3D Gaussian splat."""
     Type = File3D
 
 
@@ -2296,6 +2324,7 @@ __all__ = [
     "LossMap",
     "Voxel",
     "Mesh",
+    "Splat",
     "File3DAny",
     "File3DGLB",
     "File3DGLTF",
@@ -2303,6 +2332,10 @@ __all__ = [
     "File3DOBJ",
     "File3DSTL",
     "File3DUSDZ",
+    "File3DPLY",
+    "File3DSPLAT",
+    "File3DSPZ",
+    "File3DKSPLAT",
     "Hooks",
     "HookKeyframes",
     "TimestepsRange",
