@@ -73,10 +73,10 @@ class ResolutionSelector(io.ComfyNode):
             ],
             outputs=[
                 io.Int.Output(
-                    "width", tooltip="Calculated width in pixels (multiple of 8)."
+                    "width", tooltip="Calculated width in pixels multiplied by the selected multiple."
                 ),
                 io.Int.Output(
-                    "height", tooltip="Calculated height in pixels (multiple of 8)."
+                    "height", tooltip="Calculated height in pixels multiplied by the selected multiple."
                 ),
             ],
         )
