@@ -52,6 +52,24 @@ class ResolutionSelector(io.ComfyNode):
                     step=0.1,
                     tooltip="Target total megapixels. 1.0 MP ≈ 1024×1024 for square.",
                 ),
+                io.Int.Input(
+                    id="multiple",
+                    default=8,
+                    min=8,
+                    max=128,
+                    step=4,
+                    tooltip="Nearest multiple of the result to set the selected resolution to.",
+                    advanced=True,
+                ),
+                io.Int.Input(
+                    id="minimum",
+                    default=256,
+                    min=32,
+                    max=4096,
+                    step=32,
+                    tooltip="Set minimum resolution for any side to be used",
+                    advanced=True,
+                ),
             ],
             outputs=[
                 io.Int.Output(
@@ -64,12 +82,20 @@ class ResolutionSelector(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, aspect_ratio: str, megapixels: float) -> io.NodeOutput:
+    def execute(cls, aspect_ratio: str, megapixels: float, multiple: int, minimum: int) -> io.NodeOutput:
         w_ratio, h_ratio = ASPECT_RATIOS[aspect_ratio]
         total_pixels = megapixels * 1024 * 1024
         scale = math.sqrt(total_pixels / (w_ratio * h_ratio))
-        width = round(w_ratio * scale / 8) * 8
-        height = round(h_ratio * scale / 8) * 8
+        width = round(w_ratio * scale / multiple) * multiple
+        height = round(h_ratio * scale / multiple) * multiple
+        if width < minimum or height < minimum:
+            step_w = multiple // math.gcd(w_ratio, multiple)
+            step_h = multiple // math.gcd(h_ratio, multiple)
+            k_step = step_w * step_h // math.gcd(step_w, step_h)
+            min_k = math.ceil(max(minimum / w_ratio, minimum / h_ratio))
+            k = math.ceil(min_k / k_step) * k_step
+            width = w_ratio * k
+            height = h_ratio * k
         return io.NodeOutput(width, height)
 
 
