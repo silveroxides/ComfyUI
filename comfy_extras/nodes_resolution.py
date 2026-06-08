@@ -6,24 +6,24 @@ from comfy_api.latest import ComfyExtension, io
 
 class AspectRatio(str, Enum):
     SQUARE = "1:1 (Square)"
+    PHOTO_V = "2:3 (Portrait Photo)"
     PHOTO_H = "3:2 (Photo)"
+    STANDARD_V = "3:4 (Portrait Standard)"
     STANDARD_H = "4:3 (Standard)"
+    WIDESCREEN_V = "9:16 (Portrait Widescreen)"
     WIDESCREEN_H = "16:9 (Widescreen)"
     ULTRAWIDE_H = "21:9 (Ultrawide)"
-    PHOTO_V = "2:3 (Portrait Photo)"
-    STANDARD_V = "3:4 (Portrait Standard)"
-    WIDESCREEN_V = "9:16 (Portrait Widescreen)"
 
 
 ASPECT_RATIOS: dict[AspectRatio, tuple[int, int]] = {
     AspectRatio.SQUARE: (1, 1),
+    AspectRatio.PHOTO_V: (2, 3),
     AspectRatio.PHOTO_H: (3, 2),
+    AspectRatio.STANDARD_V: (3, 4),
     AspectRatio.STANDARD_H: (4, 3),
+    AspectRatio.WIDESCREEN_V: (9, 16),
     AspectRatio.WIDESCREEN_H: (16, 9),
     AspectRatio.ULTRAWIDE_H: (21, 9),
-    AspectRatio.PHOTO_V: (2, 3),
-    AspectRatio.STANDARD_V: (3, 4),
-    AspectRatio.WIDESCREEN_V: (9, 16),
 }
 
 
@@ -50,7 +50,7 @@ class ResolutionSelector(io.ComfyNode):
                     min=0.1,
                     max=16.0,
                     step=0.1,
-                    tooltip="Target total megapixels. 1.0 MP ≈ 1024×1024 for square.",
+                    tooltip="Target total megapixels. 1.0 MP ≈ 1024x1024 for square.",
                 ),
                 io.Int.Input(
                     id="multiple",
@@ -59,15 +59,6 @@ class ResolutionSelector(io.ComfyNode):
                     max=128,
                     step=4,
                     tooltip="Nearest multiple of the result to set the selected resolution to.",
-                    advanced=True,
-                ),
-                io.Int.Input(
-                    id="minimum",
-                    default=256,
-                    min=32,
-                    max=4096,
-                    step=32,
-                    tooltip="Set minimum resolution for any side to be used",
                     advanced=True,
                 ),
             ],
@@ -82,20 +73,12 @@ class ResolutionSelector(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, aspect_ratio: str, megapixels: float, multiple: int, minimum: int) -> io.NodeOutput:
+    def execute(cls, aspect_ratio: str, megapixels: float, multiple: int) -> io.NodeOutput:
         w_ratio, h_ratio = ASPECT_RATIOS[aspect_ratio]
         total_pixels = megapixels * 1024 * 1024
         scale = math.sqrt(total_pixels / (w_ratio * h_ratio))
         width = round(w_ratio * scale / multiple) * multiple
         height = round(h_ratio * scale / multiple) * multiple
-        if width < minimum or height < minimum:
-            step_w = multiple // math.gcd(w_ratio, multiple)
-            step_h = multiple // math.gcd(h_ratio, multiple)
-            k_step = step_w * step_h // math.gcd(step_w, step_h)
-            min_k = math.ceil(max(minimum / w_ratio, minimum / h_ratio))
-            k = math.ceil(min_k / k_step) * k_step
-            width = w_ratio * k
-            height = h_ratio * k
         return io.NodeOutput(width, height)
 
 
