@@ -13,23 +13,37 @@ _LOGSNR_MAX = 18.0
 
 class Ideogram4Enum(enum.Enum):
     QUALITY = "Quality"
+    HIGH = "High"
     DEFAULT = "Default"
+    FAST = "Fast"
     TURBO = "Turbo"
 
 IDEOGRAM4_PRESET_CONFIGS = {
-  "Quality": {
+  Ideogram4Enum.QUALITY.value: {
     "num_steps": 48,
     "mu": 0.0,
     "std": 1.5,
     "preset_id": "V4_QUALITY_48"
   },
-  "Default": {
+  Ideogram4Enum.HIGH.value: {
+    "num_steps": 34,
+    "mu": 0.0,
+    "std": 1.6875,
+    "preset_id": "V4_HIGH_34"
+  },
+  Ideogram4Enum.DEFAULT.value: {
     "num_steps": 20,
     "mu": 0.0,
     "std": 1.75,
     "preset_id": "V4_DEFAULT_20"
   },
-  "Turbo": {
+  Ideogram4Enum.FAST.value: {
+    "num_steps": 16,
+    "mu": 0.25,
+    "std": 1.8375,
+    "preset_id": "V4_FAST_16"
+  },
+  Ideogram4Enum.TURBO.value: {
     "num_steps": 12,
     "mu": 0.5,
     "std": 1.75,
@@ -87,6 +101,7 @@ class Ideogram4SchedulerPreset(Ideogram4Scheduler):
             node_id="Ideogram4SchedulerPreset",
             display_name="Ideogram 4 Scheduler (Presets)",
             category="sampling/custom_sampling/schedulers",
+            description="Schedule Presets for Ideogram 4. They are as follows: Quality=48, High=34, Default=20, Fast=16, Turbo=12",
             inputs=[
                 io.Combo.Input("preset", options=[e.value for e in Ideogram4Enum], default=Ideogram4Enum.DEFAULT.value),
                 io.Int.Input("width", default=1024, min=256, max=8192, step=16),
