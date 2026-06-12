@@ -16,7 +16,7 @@ from comfy_api_nodes.util import (
 )
 from comfy_api_nodes.util._helpers import (
     default_base_url,
-    get_auth_header,
+    get_comfy_api_headers,
     get_node_id,
     is_processing_interrupted,
 )
@@ -34,7 +34,7 @@ class SoniloVideoToMusic(IO.ComfyNode):
         return IO.Schema(
             node_id="SoniloVideoToMusic",
             display_name="Sonilo Video to Music",
-            category="audio/partner/Sonilo",
+            category="partner/audio/Sonilo",
             description="Generate music from video content using Sonilo's AI model. "
             "Analyzes the video and creates matching music.",
             inputs=[
@@ -99,7 +99,7 @@ class SoniloTextToMusic(IO.ComfyNode):
         return IO.Schema(
             node_id="SoniloTextToMusic",
             display_name="Sonilo Text to Music",
-            category="audio/partner/Sonilo",
+            category="partner/audio/Sonilo",
             description="Generate music from a text prompt using Sonilo's AI model. "
             "Leave duration at 0 to let the model infer it from the prompt.",
             inputs=[
@@ -174,8 +174,7 @@ async def _stream_sonilo_music(
     """POST ``form`` to Sonilo, read the NDJSON stream, and return the first stream's audio bytes."""
     url = urljoin(default_base_url().rstrip("/") + "/", endpoint.path.lstrip("/"))
 
-    headers: dict[str, str] = {}
-    headers.update(get_auth_header(cls))
+    headers = get_comfy_api_headers(cls)
     headers.update(endpoint.headers)
 
     node_id = get_node_id(cls)
