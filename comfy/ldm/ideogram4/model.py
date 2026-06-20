@@ -253,8 +253,8 @@ class Ideogram4Transformer2DModel(Ideogram4Transformer):
 
             for ref in ref_latents:
                 ref_b, ref_c, ref_h, ref_w = ref.shape
-                ref_gh = ref_h // self.patch_size
-                ref_gw = ref_w // self.patch_size
+                ref_gh = ref_h
+                ref_gw = ref_w
 
                 if index_ref_method:
                     index += 1
@@ -343,8 +343,8 @@ class Ideogram4Transformer2DModel(Ideogram4Transformer):
 
             for ref in ref_latents:
                 ref_b, ref_c, ref_h, ref_w = ref.shape
-                ref_gh = ref_h // self.patch_size
-                ref_gw = ref_w // self.patch_size
+                ref_gh = ref_h
+                ref_gw = ref_w
 
                 if index_ref_method:
                     index += 1
