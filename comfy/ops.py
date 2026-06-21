@@ -340,6 +340,10 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
     else:
         offload_stream = None
 
+    # Custom QuantizedTensor subclasses cannot be stored as slices of a flat, plain contiguous buffer
+    if isinstance(s.weight, QuantizedTensor) or isinstance(s.bias, QuantizedTensor):
+        offload_stream = None
+
     bias = None
     weight = None
 
