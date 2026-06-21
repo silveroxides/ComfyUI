@@ -1767,6 +1767,9 @@ class Boogu(Omnigen2):
         "image_model": "boogu",
     }
 
+    def __init__(self, unet_config):
+        super(Omnigen2, self).__init__(unet_config)
+
     sampling_settings = {
         "multiplier": 1.0,
         "shift": 3.16,
