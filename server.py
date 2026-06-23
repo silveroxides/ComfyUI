@@ -1,3 +1,4 @@
+import errno
 import os
 import sys
 import asyncio
@@ -7,7 +8,15 @@ import time
 import nodes
 import folder_paths
 import execution
-from comfy_execution.jobs import JobStatus, get_job, get_all_jobs
+from comfy_execution.jobs import (
+    JobStatus,
+    get_job,
+    get_all_jobs,
+    validate_job_id,
+    cancel_job,
+    CANCEL_PENDING,
+    CANCEL_RUNNING,
+)
 import uuid
 import urllib
 import json
@@ -26,6 +35,7 @@ import logging
 
 import mimetypes
 from comfy.cli_args import args
+from comfy.deploy_environment import get_deploy_environment
 import comfy.utils
 import comfy.model_management
 from comfy_api import feature_flags
@@ -146,6 +156,10 @@ def is_loopback(host):
 def create_origin_only_middleware():
     @web.middleware
     async def origin_only_middleware(request: web.Request, handler):
+        if 'Sec-Fetch-Site' in request.headers:
+            sec_fetch_site = request.headers['Sec-Fetch-Site']
+            if sec_fetch_site == 'cross-site':
+                return web.Response(status=403)
         #this code is used to prevent the case where a random website can queue comfy workflows by making a POST to 127.0.0.1 which browsers don't prevent for some dumb reason.
         #in that case the Host and Origin hostnames won't match
         #I know the proper fix would be to add a cookie but this should take care of the problem in the meantime
@@ -641,16 +655,36 @@ class PromptServer():
 
         @routes.get("/system_stats")
         async def system_stats(request):
-            device = comfy.model_management.get_torch_device()
-            device_name = comfy.model_management.get_torch_device_name(device)
+            primary_device = comfy.model_management.get_torch_device()
             cpu_device = comfy.model_management.torch.device("cpu")
             ram_total = comfy.model_management.get_total_memory(cpu_device)
             ram_free = comfy.model_management.get_free_memory(cpu_device)
-            vram_total, torch_vram_total = comfy.model_management.get_total_memory(device, torch_total_too=True)
-            vram_free, torch_vram_free = comfy.model_management.get_free_memory(device, torch_free_too=True)
             required_frontend_version = FrontendManager.get_required_frontend_version()
             installed_templates_version = FrontendManager.get_installed_templates_version()
             required_templates_version = FrontendManager.get_required_templates_version()
+            comfy_package_versions = FrontendManager.get_comfy_package_versions()
+
+            # Report every torch device visible to multigpu, with the primary
+            # device first so existing clients that read devices[0] keep working.
+            torch_devices = comfy.model_management.get_all_torch_devices()
+            if primary_device in torch_devices:
+                torch_devices = [primary_device] + [d for d in torch_devices if d != primary_device]
+            else:
+                torch_devices = [primary_device] + list(torch_devices)
+
+            device_entries = []
+            for d in torch_devices:
+                vram_total, torch_vram_total = comfy.model_management.get_total_memory(d, torch_total_too=True)
+                vram_free, torch_vram_free = comfy.model_management.get_free_memory(d, torch_free_too=True)
+                device_entries.append({
+                    "name": comfy.model_management.get_torch_device_name(d),
+                    "type": d.type,
+                    "index": d.index,
+                    "vram_total": vram_total,
+                    "vram_free": vram_free,
+                    "torch_vram_total": torch_vram_total,
+                    "torch_vram_free": torch_vram_free,
+                })
 
             system_stats = {
                 "system": {
@@ -661,22 +695,14 @@ class PromptServer():
                     "required_frontend_version": required_frontend_version,
                     "installed_templates_version": installed_templates_version,
                     "required_templates_version": required_templates_version,
+                    "comfy_package_versions": comfy_package_versions,
                     "python_version": sys.version,
                     "pytorch_version": comfy.model_management.torch_version,
                     "embedded_python": os.path.split(os.path.split(sys.executable)[0])[1] == "python_embeded",
+                    "deploy_environment": get_deploy_environment(),
                     "argv": sys.argv
                 },
-                "devices": [
-                    {
-                        "name": device_name,
-                        "type": device.type,
-                        "index": device.index,
-                        "vram_total": vram_total,
-                        "vram_free": vram_free,
-                        "torch_vram_total": torch_vram_total,
-                        "torch_vram_free": torch_vram_free,
-                    }
-                ]
+                "devices": device_entries
             }
             return web.json_response(system_stats)
 
@@ -708,6 +734,11 @@ class PromptServer():
                 info['output_node'] = True
             else:
                 info['output_node'] = False
+
+            if hasattr(obj_class, 'HAS_INTERMEDIATE_OUTPUT') and obj_class.HAS_INTERMEDIATE_OUTPUT == True:
+                info['has_intermediate_output'] = True
+            else:
+                info['has_intermediate_output'] = False
 
             if hasattr(obj_class, 'CATEGORY'):
                 info['category'] = obj_class.CATEGORY
@@ -876,6 +907,107 @@ class PromptServer():
 
             return web.json_response(job)
 
+        def _cancel_job_by_id(job_id):
+            """Cancel a single job by id using the queue's existing mechanics.
+
+            Running jobs are interrupted (same mechanism as /interrupt); pending
+            jobs are dequeued (same mechanism as /queue {"delete": [...]}).
+            Already-finished or unknown ids are no-ops. State-agnostic.
+
+            Returns True when a cancel was actually dispatched (running or
+            pending job), False when the call was a no-op (terminal/unknown id).
+            """
+            running, queued = self.prompt_queue.get_current_queue()
+            history = self.prompt_queue.get_history()
+
+            def interrupt(prompt_id):
+                logging.info(f"Cancelling running prompt {prompt_id}")
+                # Atomic: only interrupts if the job is still the one running,
+                # so a cancel can't land on a prompt that started in the gap
+                # since the snapshot above. Returns whether it actually fired.
+                return self.prompt_queue.interrupt_if_running(prompt_id)
+
+            def dequeue(prompt_id):
+                logging.info(f"Cancelling pending prompt {prompt_id}")
+                return self.prompt_queue.delete_queue_item(lambda a: a[1] == prompt_id)
+
+            classification = cancel_job(job_id, running, queued, history, interrupt, dequeue)
+            return classification in (CANCEL_RUNNING, CANCEL_PENDING)
+
+        @routes.post("/api/jobs/{job_id}/cancel")
+        async def cancel_job_by_id(request):
+            """Cancel a single job by id, regardless of state.
+
+            Idempotent: cancelling a job that has already finished, or an id
+            that is not known, returns 200 with {"cancelled": false} rather
+            than an error.
+            """
+            job_id = request.match_info.get("job_id", None)
+            if not job_id:
+                return web.json_response(
+                    {"error": "job_id is required"},
+                    status=400
+                )
+
+            cancelled = _cancel_job_by_id(job_id)
+            return web.json_response({"cancelled": cancelled})
+
+        @routes.post("/api/jobs/cancel")
+        async def cancel_jobs_batch(request):
+            """Cancel a batch of jobs by id.
+
+            Body: {"job_ids": ["<uuid>", ...]}
+
+            Best-effort and idempotent: every well-formed id is cancelled if it
+            is running or pending; ids that are already finished or unknown are
+            no-ops, not errors. A batch of all no-ops still returns 200 with
+            {"cancelled": false}. This matches the single-cancel endpoint and
+            means "cancel all" still cancels the in-progress jobs even if some
+            finished between the client's snapshot and the request. Malformed
+            ids are still rejected up front with 400 (see below).
+            """
+            try:
+                json_data = await request.json()
+            except json.JSONDecodeError:
+                return web.json_response(
+                    {"error": "Request body must be valid JSON"},
+                    status=400
+                )
+
+            job_ids = json_data.get("job_ids") if isinstance(json_data, dict) else None
+            if not isinstance(job_ids, list):
+                return web.json_response(
+                    {"error": "job_ids must be a list"},
+                    status=400
+                )
+
+            # Validate that every element is a well-formed job id before doing
+            # anything else.  An unhashable element (e.g. a nested dict or list)
+            # would cause a TypeError when used as a history dict key; a
+            # non-string or non-UUID value is never a valid id.  Reject early
+            # with 400 rather than letting the classify loop raise 500.
+            invalid_ids = []
+            for jid in job_ids:
+                try:
+                    validate_job_id(jid)
+                except (ValueError, AttributeError):
+                    invalid_ids.append(jid if isinstance(jid, str) else repr(jid))
+            if invalid_ids:
+                return web.json_response(
+                    {"error": "job_ids contains invalid id(s)", "invalid_ids": invalid_ids},
+                    status=400,
+                )
+
+            # Best-effort: cancel each id that is still running/pending; an id
+            # that has finished or never existed is a no-op rather than a reason
+            # to fail the whole batch.
+            cancelled = False
+            for jid in job_ids:
+                if _cancel_job_by_id(jid):
+                    cancelled = True
+
+            return web.json_response({"cancelled": cancelled})
+
         @routes.get("/history")
         async def get_history(request):
             max_items = request.rel_url.query.get("max_items", None)
@@ -921,7 +1053,21 @@ class PromptServer():
 
             if "prompt" in json_data:
                 prompt = json_data["prompt"]
-                prompt_id = str(json_data.get("prompt_id", uuid.uuid4()))
+                client_prompt_id = json_data.get("prompt_id")
+                if client_prompt_id is None:
+                    # Absent or explicit null: the server mints the id.
+                    prompt_id = str(uuid.uuid4())
+                else:
+                    try:
+                        prompt_id = validate_job_id(client_prompt_id)
+                    except ValueError:
+                        error = {
+                            "type": "invalid_prompt_id",
+                            "message": "prompt_id must be a valid UUID",
+                            "details": "prompt_id must be a UUID string in canonical lowercase hyphenated form; omit it to let the server generate one",
+                            "extra_info": {}
+                        }
+                        return web.json_response({"error": error, "node_errors": {}}, status=400)
 
                 partial_execution_targets = None
                 if "partial_execution_targets" in json_data:
@@ -936,6 +1082,11 @@ class PromptServer():
 
                 if "client_id" in json_data:
                     extra_data["client_id"] = json_data["client_id"]
+
+                if "comfy_usage_source" not in extra_data:
+                    usage_source = request.headers.get("Comfy-Usage-Source")
+                    if usage_source:
+                        extra_data["comfy_usage_source"] = usage_source
                 if valid[0]:
                     outputs_to_execute = valid[2]
                     sensitive = {}
@@ -1232,11 +1383,26 @@ class PromptServer():
 
         if verbose:
             logging.info("Starting server\n")
+            if args.debug_hang:
+                logging.info(
+                    f"{'-' * 80}\n"
+                    "ComfyUI has been started in debug-hang mode. Run your workflow as normal up to\n"
+                    "the point of the hang or freeze, then use ctrl-C in the cmd or controlling\n"
+                    "terminal to dump the python backtraces for debugging. Please attach the extra\n"
+                    "debug info to your bug report.\n"
+                    f"{'-' * 80}"
+                )
         for addr in addresses:
             address = addr[0]
             port = addr[1]
             site = web.TCPSite(runner, address, port, ssl_context=ssl_ctx)
-            await site.start()
+            try:
+                await site.start()
+            except OSError as e:
+                if e.errno == errno.EADDRINUSE:
+                    logging.error(f"Port {port} is already in use on address {address}. Please close the other application or use a different port with --port.")
+                    raise SystemExit(1)
+                raise
 
             if not hasattr(self, 'address'):
                 self.address = address #TODO: remove this
