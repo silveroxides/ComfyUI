@@ -317,6 +317,9 @@ class SingleStreamDiT(nn.Module):
             negative_ref_method = ref_latents_method == "negative_index"
 
             for ref in ref_latents:
+                if ref.ndim == 5:
+                    ref_b5, ref_c5, ref_t5, ref_h5, ref_w5 = ref.shape
+                    ref = ref.reshape(ref_b5 * ref_t5, ref_c5, ref_h5, ref_w5)
                 ref_pad = comfy.ldm.common_dit.pad_to_patch_size(ref, (patch, patch))
                 ref_b, ref_c, ref_h, ref_w = ref_pad.shape
                 ref_gh = ref_h // patch
