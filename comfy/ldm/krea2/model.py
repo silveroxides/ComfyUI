@@ -253,16 +253,30 @@ class SingleStreamDiT(nn.Module):
         context = self.txtmlp(context)
 
         txtlen, imglen = context.shape[1], img.shape[1]
-        combined = torch.cat((context, img), dim=1)
+
+        ref_latents = kwargs.get("ref_latents", None)
+        ref_latents_method = kwargs.get("ref_latents_method", "offset")
+        device = img.device
+
+        ref_tokens_list, ref_pos_ids_list, ref_num_tokens = self._process_ref_latents(
+            ref_latents, ref_latents_method, device, bs
+        )
+
+        if len(ref_num_tokens) > 0:
+            transformer_options = transformer_options.copy()
+            if "reference_image_num_tokens" not in transformer_options:
+                transformer_options["reference_image_num_tokens"] = []
+            transformer_options["reference_image_num_tokens"].extend(ref_num_tokens)
+
+        combined = torch.cat([context, img] + ref_tokens_list, dim=1)
 
         # Position ids: text at 0, image at (0, h_idx, w_idx).
-        device = combined.device
         txtpos = torch.zeros(bs, txtlen, 3, device=device, dtype=torch.float32)
         imgids = torch.zeros(h_, w_, 3, device=device, dtype=torch.float32)
         imgids[..., 1] = torch.arange(h_, device=device, dtype=torch.float32)[:, None]
         imgids[..., 2] = torch.arange(w_, device=device, dtype=torch.float32)[None, :]
         imgpos = imgids.reshape(1, h_ * w_, 3).repeat(bs, 1, 1)
-        pos = torch.cat((txtpos, imgpos), dim=1)
+        pos = torch.cat([txtpos, imgpos] + ref_pos_ids_list, dim=1)
 
         freqs = self.pe_embedder(pos)
 
@@ -288,3 +302,55 @@ class SingleStreamDiT(nn.Module):
                 f"Load the text encoder with CLIPLoader type 'krea2'."
             )
         return context.reshape(b, seq, self.txtlayers, self.txtdim)
+
+    def _process_ref_latents(self, ref_latents, ref_latents_method, device, bs):
+        ref_tokens_list = []
+        ref_pos_ids_list = []
+        ref_num_tokens = []
+        patch = self.patch
+
+        if ref_latents is not None:
+            h = 0
+            w = 0
+            index = 0
+            index_ref_method = (ref_latents_method == "index") or (ref_latents_method == "index_timestep_zero")
+            negative_ref_method = ref_latents_method == "negative_index"
+
+            for ref in ref_latents:
+                ref_pad = comfy.ldm.common_dit.pad_to_patch_size(ref, (patch, patch))
+                ref_b, ref_c, ref_h, ref_w = ref_pad.shape
+                ref_gh = ref_h // patch
+                ref_gw = ref_w // patch
+
+                if index_ref_method:
+                    index += 1
+                    gh_offset = 0
+                    gw_offset = 0
+                elif negative_ref_method:
+                    index -= 1
+                    gh_offset = 0
+                    gw_offset = 0
+                else: # offset/default
+                    index = 1
+                    gh_offset = 0
+                    gw_offset = 0
+                    if ref_gh + h > ref_gw + w:
+                        gw_offset = w
+                    else:
+                        gh_offset = h
+                    h = max(h, ref_gh + gh_offset)
+                    w = max(w, ref_gw + gw_offset)
+
+                ref_tokens = rearrange(ref_pad, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch, pw=patch)
+                ref_tokens = self.first(ref_tokens)
+                ref_tokens_list.append(ref_tokens)
+                ref_num_tokens.append(ref_tokens.shape[1])
+
+                ref_pos_ids = torch.zeros(ref_gh, ref_gw, 3, device=device, dtype=torch.float32)
+                ref_pos_ids[..., 0] = index
+                ref_pos_ids[..., 1] = torch.arange(ref_gh, device=device, dtype=torch.float32)[:, None] + gh_offset
+                ref_pos_ids[..., 2] = torch.arange(ref_gw, device=device, dtype=torch.float32)[None, :] + gw_offset
+                ref_pos_ids = ref_pos_ids.reshape(1, ref_gh * ref_gw, 3).repeat(bs, 1, 1)
+                ref_pos_ids_list.append(ref_pos_ids)
+
+        return ref_tokens_list, ref_pos_ids_list, ref_num_tokens
