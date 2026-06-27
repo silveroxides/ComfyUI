@@ -31,6 +31,8 @@ try:
         except ImportError as e:
             logging.error(f"Failed to import triton, Error: {e}, the comfy-kitchen triton backend will not be available.")
             ck.registry.disable("triton")
+        if args.prioritize_triton:
+            ck.set_backend_priority(["triton", "cuda", "eager"])
     else:
         ck.registry.disable("triton")
     for k, v in ck.list_backends().items():
