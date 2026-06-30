@@ -259,7 +259,7 @@ class SingleStreamDiT(nn.Module):
         device = img.device
 
         ref_tokens_list, ref_pos_ids_list, ref_num_tokens = self._process_ref_latents(
-            ref_latents, ref_latents_method, device, bs
+            ref_latents, ref_latents_method, device, bs, h_, w_
         )
 
         if len(ref_num_tokens) > 0:
@@ -303,15 +303,15 @@ class SingleStreamDiT(nn.Module):
             )
         return context.reshape(b, seq, self.txtlayers, self.txtdim)
 
-    def _process_ref_latents(self, ref_latents, ref_latents_method, device, bs):
+    def _process_ref_latents(self, ref_latents, ref_latents_method, device, bs, h_main, w_main):
         ref_tokens_list = []
         ref_pos_ids_list = []
         ref_num_tokens = []
         patch = self.patch
 
         if ref_latents is not None:
-            h = 0
-            w = 0
+            h = h_main
+            w = w_main
             index = 0
             index_ref_method = (ref_latents_method == "index") or (ref_latents_method == "index_timestep_zero")
             negative_ref_method = ref_latents_method == "negative_index"
@@ -327,22 +327,19 @@ class SingleStreamDiT(nn.Module):
 
                 if index_ref_method:
                     index += 1
-                    gh_offset = 0
-                    gw_offset = 0
                 elif negative_ref_method:
                     index -= 1
-                    gh_offset = 0
-                    gw_offset = 0
                 else: # offset/default
-                    index = 1
-                    gh_offset = 0
-                    gw_offset = 0
-                    if ref_gh + h > ref_gw + w:
-                        gw_offset = w
-                    else:
-                        gh_offset = h
-                    h = max(h, ref_gh + gh_offset)
-                    w = max(w, ref_gw + gw_offset)
+                    index = 0  # Stay in t_idx = 0 plane to remain 100% in-distribution
+
+                gh_offset = 0
+                gw_offset = 0
+                if ref_gh + h > ref_gw + w:
+                    gw_offset = w
+                else:
+                    gh_offset = h
+                h = max(h, ref_gh + gh_offset)
+                w = max(w, ref_gw + gw_offset)
 
                 ref_tokens = rearrange(ref_pad, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch, pw=patch)
                 ref_tokens = self.first(ref_tokens)
