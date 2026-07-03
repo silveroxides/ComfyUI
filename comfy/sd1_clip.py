@@ -548,6 +548,12 @@ class SDTokenizer:
         split_embed = embedding_name.split()
         embedding_name = split_embed[0]
         leftover = ' '.join(split_embed[1:])
+
+        match = re.search(r'[<\[]', embedding_name)
+        if match is not None:
+            leftover = embedding_name[match.start():] + (" " + leftover if leftover else "")
+            embedding_name = embedding_name[:match.start()]
+
         embed = load_embed(embedding_name, self.embedding_directory, self.embedding_size, self.embedding_key)
         if embed is None:
             stripped = embedding_name.strip(',')
@@ -585,7 +591,7 @@ class SDTokenizer:
         tokens = []
         for weighted_segment, weight in parsed_weights:
             to_tokenize = unescape_important(weighted_segment)
-            split = re.split(' {0}|\n{0}'.format(self.embedding_identifier), to_tokenize)
+            split = re.split(r'(?<=\s){}'.format(re.escape(self.embedding_identifier)), to_tokenize)
             to_tokenize = [split[0]]
             for i in range(1, len(split)):
                 to_tokenize.append("{}{}".format(self.embedding_identifier, split[i]))
