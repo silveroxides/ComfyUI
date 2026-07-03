@@ -535,11 +535,18 @@ class SDTokenizer:
         self.embedding_directory = embedding_directory
         self.max_word_length = 8
         self.embedding_identifier = "embedding:"
-        self.embedding_identifiers = ["embedding:", "EMB:", "TE:"]
         self.embedding_size = embedding_size
         self.embedding_key = embedding_key
 
         self.disable_weights = disable_weights
+
+    @property
+    def embedding_identifiers(self):
+        identifiers = [self.embedding_identifier]
+        for item in ["EMB:", "TE:"]:
+            if item not in identifiers:
+                identifiers.append(item)
+        return identifiers
 
     def _try_get_embedding(self, embedding_name:str):
         '''
