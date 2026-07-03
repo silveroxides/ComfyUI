@@ -535,6 +535,7 @@ class SDTokenizer:
         self.embedding_directory = embedding_directory
         self.max_word_length = 8
         self.embedding_identifier = "embedding:"
+        self.embedding_identifiers = ["embedding:", "EMB:", "TE:"]
         self.embedding_size = embedding_size
         self.embedding_key = embedding_key
 
@@ -585,16 +586,24 @@ class SDTokenizer:
         tokens = []
         for weighted_segment, weight in parsed_weights:
             to_tokenize = unescape_important(weighted_segment)
-            split = re.split(' {0}|\n{0}'.format(self.embedding_identifier), to_tokenize)
+            pattern = r'(?<=\s)({})'.format('|'.join(map(re.escape, self.embedding_identifiers)))
+            split = re.split(pattern, to_tokenize)
             to_tokenize = [split[0]]
-            for i in range(1, len(split)):
-                to_tokenize.append("{}{}".format(self.embedding_identifier, split[i]))
+            for i in range(1, len(split), 2):
+                if i + 1 < len(split):
+                    to_tokenize.append("{}{}".format(split[i], split[i+1]))
 
             to_tokenize = [x for x in to_tokenize if x != ""]
             for word in to_tokenize:
                 # if we find an embedding, deal with the embedding
-                if word.startswith(self.embedding_identifier) and self.embedding_directory is not None:
-                    embedding_name = word[len(self.embedding_identifier):].strip('\n')
+                matched_id = None
+                for identifier in self.embedding_identifiers:
+                    if word.startswith(identifier):
+                        matched_id = identifier
+                        break
+
+                if matched_id is not None and self.embedding_directory is not None:
+                    embedding_name = word[len(matched_id):].strip('\n')
                     embed, leftover = self._try_get_embedding(embedding_name)
                     if embed is None:
                         logging.warning(f"warning, embedding:{embedding_name} does not exist, ignoring")
