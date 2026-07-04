@@ -543,7 +543,7 @@ class SDTokenizer:
     def _try_get_embedding(self, embedding_name:str):
         '''
         Takes a potential embedding name and tries to retrieve it.
-        Returns a Tuple consisting of the embedding and any leftover string, embedding can be None.
+        Returns a Tuple consisting of the embedding, the cleaned embedding name, and any leftover string, embedding can be None.
         '''
         split_embed = embedding_name.split()
         embedding_name = split_embed[0]
@@ -559,8 +559,8 @@ class SDTokenizer:
             stripped = embedding_name.strip(',')
             if len(stripped) < len(embedding_name):
                 embed = load_embed(stripped, self.embedding_directory, self.embedding_size, self.embedding_key)
-                return (embed, "{} {}".format(embedding_name[len(stripped):], leftover))
-        return (embed, leftover)
+                return (embed, embedding_name, "{} {}".format(embedding_name[len(stripped):], leftover))
+        return (embed, embedding_name, leftover)
 
     def pad_tokens(self, tokens, amount):
         if self.pad_left:
@@ -601,7 +601,7 @@ class SDTokenizer:
                 # if we find an embedding, deal with the embedding
                 if word.startswith(self.embedding_identifier) and self.embedding_directory is not None:
                     embedding_name = word[len(self.embedding_identifier):].strip('\n')
-                    embed, leftover = self._try_get_embedding(embedding_name)
+                    embed, embedding_name, leftover = self._try_get_embedding(embedding_name)
                     if embed is None:
                         logging.warning(f"warning, embedding:{embedding_name} does not exist, ignoring")
                     else:
