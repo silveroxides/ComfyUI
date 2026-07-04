@@ -551,18 +551,24 @@ class SDTokenizer:
     def _try_get_embedding(self, embedding_name:str):
         '''
         Takes a potential embedding name and tries to retrieve it.
-        Returns a Tuple consisting of the embedding and any leftover string, embedding can be None.
+        Returns a Tuple consisting of the embedding, the cleaned embedding name, and any leftover string, embedding can be None.
         '''
         split_embed = embedding_name.split()
         embedding_name = split_embed[0]
         leftover = ' '.join(split_embed[1:])
+
+        match = re.search(r'[<\[]', embedding_name)
+        if match is not None:
+            leftover = embedding_name[match.start():] + (" " + leftover if leftover else "")
+            embedding_name = embedding_name[:match.start()]
+
         embed = load_embed(embedding_name, self.embedding_directory, self.embedding_size, self.embedding_key)
         if embed is None:
             stripped = embedding_name.strip(',')
             if len(stripped) < len(embedding_name):
                 embed = load_embed(stripped, self.embedding_directory, self.embedding_size, self.embedding_key)
-                return (embed, "{} {}".format(embedding_name[len(stripped):], leftover))
-        return (embed, leftover)
+                return (embed, embedding_name, "{} {}".format(embedding_name[len(stripped):], leftover))
+        return (embed, embedding_name, leftover)
 
     def pad_tokens(self, tokens, amount):
         if self.pad_left:
@@ -611,7 +617,7 @@ class SDTokenizer:
 
                 if matched_id is not None and self.embedding_directory is not None:
                     embedding_name = word[len(matched_id):].strip('\n')
-                    embed, leftover = self._try_get_embedding(embedding_name)
+                    embed, embedding_name, leftover = self._try_get_embedding(embedding_name)
                     if embed is None:
                         logging.warning(f"warning, embedding:{embedding_name} does not exist, ignoring")
                     else:
