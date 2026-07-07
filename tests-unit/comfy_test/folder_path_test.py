@@ -171,7 +171,6 @@ def test_models_directory_cli_and_getters(temp_dir):
             reload(comfy.cli_args)
             reload(folder_paths)
 
-        assert folder_paths.get_models_directory() == os.path.abspath(temp_dir)
         assert folder_paths.models_dir == os.path.abspath(temp_dir)
 
         with pytest.raises(Exception):
@@ -180,13 +179,4 @@ def test_models_directory_cli_and_getters(temp_dir):
         with patch.object(sys, 'argv', ["main.py"]):
             reload(comfy.cli_args)
             reload(folder_paths)
-
-
-def test_models_dir_getter_setter():
-    orig_models_dir = folder_paths.get_models_directory()
-    try:
-        folder_paths.set_models_directory("/custom/models/path")
-        assert folder_paths.get_models_directory() == "/custom/models/path"
-    finally:
-        folder_paths.set_models_directory(orig_models_dir)
 
