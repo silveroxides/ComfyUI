@@ -148,6 +148,14 @@ def set_user_directory(user_dir: str) -> None:
     global user_directory
     user_directory = user_dir
 
+def get_models_directory() -> str:
+    global models_dir
+    return models_dir
+
+def set_models_directory(models_directory: str) -> None:
+    global models_dir
+    models_dir = models_directory
+
 
 # System User Protection - Protects system directories from HTTP endpoint access
 # System Users are internal-only users that cannot be accessed via HTTP endpoints.
