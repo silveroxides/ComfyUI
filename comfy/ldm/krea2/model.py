@@ -158,11 +158,54 @@ class SingleStreamBlock(nn.Module):
         self.attn = Attention(features, heads, kvheads=kvheads, bias=bias, device=device, dtype=dtype, operations=operations)
         self.mlp = SwiGLU(features, multiplier, bias, device=device, dtype=dtype, operations=operations)
 
-    def forward(self, x, vec, freqs, mask=None, transformer_options={}):
-        prescale, preshift, pregate, postscale, postshift, postgate = self.mod(vec)
-        x = x + pregate * self.attn((1 + prescale) * self.prenorm(x) + preshift, freqs, mask, transformer_options=transformer_options)
-        x = x + postgate * self.mlp((1 + postscale) * self.postnorm(x) + postshift)
-        return x
+    def forward(self, x, vec, freqs, mask=None, transformer_options={}, vec_ref=None, split=None):
+        if vec_ref is not None and split is not None:
+            m = self.mod(vec)
+            r = self.mod(vec_ref)
+
+            # prenorm and attention
+            h = self.prenorm(x)
+            h_mod = torch.cat(
+                (
+                    (1 + m[0]) * h[:, :split] + m[1],
+                    (1 + r[0]) * h[:, split:] + r[1]
+                ),
+                dim=1
+            )
+            attn_out = self.attn(h_mod, freqs, mask, transformer_options=transformer_options)
+            attn_gate = torch.cat(
+                (
+                    m[2] * attn_out[:, :split],
+                    r[2] * attn_out[:, split:]
+                ),
+                dim=1
+            )
+            x = x + attn_gate
+
+            # postnorm and mlp
+            h = self.postnorm(x)
+            h_mod = torch.cat(
+                (
+                    (1 + m[3]) * h[:, :split] + m[4],
+                    (1 + r[3]) * h[:, split:] + r[4]
+                ),
+                dim=1
+            )
+            mlp_out = self.mlp(h_mod)
+            mlp_gate = torch.cat(
+                (
+                    m[5] * mlp_out[:, :split],
+                    r[5] * mlp_out[:, split:]
+                ),
+                dim=1
+            )
+            x = x + mlp_gate
+            return x
+        else:
+            prescale, preshift, pregate, postscale, postshift, postgate = self.mod(vec)
+            x = x + pregate * self.attn((1 + prescale) * self.prenorm(x) + preshift, freqs, mask, transformer_options=transformer_options)
+            x = x + postgate * self.mlp((1 + postscale) * self.postnorm(x) + postshift)
+            return x
 
 
 class LastLayer(nn.Module):
@@ -259,7 +302,7 @@ class SingleStreamDiT(nn.Module):
         device = img.device
 
         ref_tokens_list, ref_pos_ids_list, ref_num_tokens = self._process_ref_latents(
-            ref_latents, ref_latents_method, device, bs, h_, w_
+            ref_latents, ref_latents_method, device, bs, h_, w_, img.dtype
         )
 
         if len(ref_num_tokens) > 0:
@@ -280,8 +323,16 @@ class SingleStreamDiT(nn.Module):
 
         freqs = self.pe_embedder(pos)
 
-        for block in self.blocks:
-            combined = block(combined, tvec, freqs, None, transformer_options=transformer_options)
+        if len(ref_num_tokens) > 0:
+            # Compute tvec0 for timestep=0 (reference)
+            t0 = self.tmlp(timestep_embedding(torch.zeros_like(timesteps), self.tdim).unsqueeze(1).to(img.dtype))
+            tvec0 = self.tproj(t0)
+            split = txtlen + imglen
+            for block in self.blocks:
+                combined = block(combined, tvec, freqs, None, transformer_options=transformer_options, vec_ref=tvec0, split=split)
+        else:
+            for block in self.blocks:
+                combined = block(combined, tvec, freqs, None, transformer_options=transformer_options)
 
         final = self.last(combined, t)
         out = final[:, txtlen:txtlen + imglen, :]
@@ -303,43 +354,22 @@ class SingleStreamDiT(nn.Module):
             )
         return context.reshape(b, seq, self.txtlayers, self.txtdim)
 
-    def _process_ref_latents(self, ref_latents, ref_latents_method, device, bs, h_main, w_main):
+    def _process_ref_latents(self, ref_latents, ref_latents_method, device, bs, h_main, w_main, dtype):
         ref_tokens_list = []
         ref_pos_ids_list = []
         ref_num_tokens = []
         patch = self.patch
 
         if ref_latents is not None:
-            h = h_main
-            w = w_main
-            index = 0
-            index_ref_method = (ref_latents_method == "index") or (ref_latents_method == "index_timestep_zero")
-            negative_ref_method = ref_latents_method == "negative_index"
-
-            for ref in ref_latents:
+            for i, ref in enumerate(ref_latents):
                 if ref.ndim == 5:
                     ref_b5, ref_c5, ref_t5, ref_h5, ref_w5 = ref.shape
                     ref = ref.reshape(ref_b5 * ref_t5, ref_c5, ref_h5, ref_w5)
                 ref_pad = comfy.ldm.common_dit.pad_to_patch_size(ref, (patch, patch))
-                ref_b, ref_c, ref_h, ref_w = ref_pad.shape
-                ref_gh = ref_h // patch
-                ref_gw = ref_w // patch
-
-                if index_ref_method:
-                    index += 1
-                elif negative_ref_method:
-                    index -= 1
-                else: # offset/default
-                    index = 0  # Stay in t_idx = 0 plane to remain 100% in-distribution
-
-                gh_offset = 0
-                gw_offset = 0
-                if ref_gh + h > ref_gw + w:
-                    gw_offset = w
-                else:
-                    gh_offset = h
-                h = max(h, ref_gh + gh_offset)
-                w = max(w, ref_gw + gw_offset)
+                ref_pad = comfy.utils.repeat_to_batch_size(ref_pad, bs)
+                ref_pad = ref_pad.to(device=device, dtype=dtype)
+                ref_gh = ref_pad.shape[-2] // patch
+                ref_gw = ref_pad.shape[-1] // patch
 
                 ref_tokens = rearrange(ref_pad, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch, pw=patch)
                 ref_tokens = self.first(ref_tokens)
@@ -347,9 +377,9 @@ class SingleStreamDiT(nn.Module):
                 ref_num_tokens.append(ref_tokens.shape[1])
 
                 ref_pos_ids = torch.zeros(ref_gh, ref_gw, 3, device=device, dtype=torch.float32)
-                ref_pos_ids[..., 0] = index
-                ref_pos_ids[..., 1] = torch.arange(ref_gh, device=device, dtype=torch.float32)[:, None] + gh_offset
-                ref_pos_ids[..., 2] = torch.arange(ref_gw, device=device, dtype=torch.float32)[None, :] + gw_offset
+                ref_pos_ids[..., 0] = i + 1.0
+                ref_pos_ids[..., 1] = torch.arange(ref_gh, device=device, dtype=torch.float32)[:, None]
+                ref_pos_ids[..., 2] = torch.arange(ref_gw, device=device, dtype=torch.float32)[None, :]
                 ref_pos_ids = ref_pos_ids.reshape(1, ref_gh * ref_gw, 3).repeat(bs, 1, 1)
                 ref_pos_ids_list.append(ref_pos_ids)
 
