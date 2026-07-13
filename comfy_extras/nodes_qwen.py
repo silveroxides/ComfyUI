@@ -77,7 +77,7 @@ def _flatten_images(images):
             continue
         if image.ndim == 3:
             image = image.unsqueeze(0)
-        sources.extend(image[i:i + 1] for i in range(image.shape[0]))
+        sources.extend(image[i:i + 1].clone() for i in range(image.shape[0]))
     return sources
 
 
