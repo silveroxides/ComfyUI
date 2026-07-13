@@ -2,10 +2,14 @@ import torch
 
 from comfy.cli_args import args as cli_args
 
+prior_cpu = cli_args.cpu
 if not torch.cuda.is_available():
     cli_args.cpu = True
 
-from comfy_extras.nodes_qwen import TextEncodeQwenImageEditFusion, _flatten_images, _fuse_conditionings, _spatial_fusion_mask, _visual_token_span
+try:
+    from comfy_extras.nodes_qwen import TextEncodeQwenImageEditFusion, _flatten_images, _fuse_conditionings, _spatial_fusion_mask, _visual_token_span
+finally:
+    cli_args.cpu = prior_cpu
 
 
 def _tokens(image_position=1, suffix=1):
