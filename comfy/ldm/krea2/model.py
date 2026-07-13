@@ -298,11 +298,15 @@ class SingleStreamDiT(nn.Module):
         txtlen, imglen = context.shape[1], img.shape[1]
 
         ref_latents = kwargs.get("ref_latents", None)
-        ref_latents_method = kwargs.get("ref_latents_method", "offset")
+        ref_latents_method = kwargs.get("ref_latents_method", "index_timestep_zero")
+        if ref_latents_method is None:
+            ref_latents_method = "index_timestep_zero"
+        if ref_latents_method != "index_timestep_zero":
+            raise ValueError(f"Unsupported Krea2 reference latent method: {ref_latents_method}")
         device = img.device
 
         ref_tokens_list, ref_pos_ids_list, ref_num_tokens = self._process_ref_latents(
-            ref_latents, ref_latents_method, device, bs, h_, w_, img.dtype
+            ref_latents, device, bs, h_, w_, img.dtype
         )
 
         if len(ref_num_tokens) > 0:
@@ -354,7 +358,7 @@ class SingleStreamDiT(nn.Module):
             )
         return context.reshape(b, seq, self.txtlayers, self.txtdim)
 
-    def _process_ref_latents(self, ref_latents, ref_latents_method, device, bs, h_main, w_main, dtype):
+    def _process_ref_latents(self, ref_latents, device, bs, h_main, w_main, dtype):
         ref_tokens_list = []
         ref_pos_ids_list = []
         ref_num_tokens = []
