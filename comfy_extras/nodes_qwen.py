@@ -8,7 +8,7 @@ import torch
 import nodes
 
 
-def _spatial_fusion_mask(height, width, num_sources, method, block_size, dither_ratio, device):
+def _spatial_fusion_mask(height, width, num_sources, method, block_size, dither_ratio, device, seed=0):
     rows = torch.arange(height, device=device).unsqueeze(1)
     columns = torch.arange(width, device=device).unsqueeze(0)
 
@@ -17,11 +17,10 @@ def _spatial_fusion_mask(height, width, num_sources, method, block_size, dither_
     if method == "spatial-block-interleave":
         return ((rows // block_size + columns // block_size) % num_sources).flatten()
     if method == "spatial-dither-random":
-        generator = torch.Generator(device=device).manual_seed(42)
+        generator = torch.Generator(device=device).manual_seed(seed)
         random = torch.rand((height, width), generator=generator, device=device)
-        if num_sources == 2:
-            return torch.where(random < dither_ratio, 0, 1).flatten()
-        return (random * num_sources).long().flatten()
+        other_sources = 1 + ((rows + columns) % (num_sources - 1))
+        return torch.where(random < dither_ratio, 0, other_sources).flatten()
     raise ValueError(f"Unsupported visual fusion method: {method}")
 
 
@@ -45,7 +44,7 @@ def _visual_token_span(tokens, cond_length, visual_tokens):
     return start, end
 
 
-def _fuse_conditionings(conditionings, tokens, visual_height, visual_width, method, block_size, dither_ratio):
+def _fuse_conditionings(conditionings, tokens, visual_height, visual_width, method, block_size, dither_ratio, seed=0):
     schedule_count = len(conditionings[0])
     if any(len(source) != schedule_count for source in conditionings):
         raise ValueError("All visual fusion sources must use the same CLIP schedule.")
@@ -60,7 +59,7 @@ def _fuse_conditionings(conditionings, tokens, visual_height, visual_width, meth
 
         start, end = spans[0]
         visuals = torch.stack([cond[:, start:end] for cond in source_conds], dim=2)
-        mask = _spatial_fusion_mask(visual_height, visual_width, len(source_conds), method, block_size, dither_ratio, visuals.device)
+        mask = _spatial_fusion_mask(visual_height, visual_width, len(source_conds), method, block_size, dither_ratio, visuals.device, seed)
         blended_visual = torch.take_along_dim(visuals, mask[None, :, None, None], dim=2).squeeze(2)
 
         blended = source_conds[0].clone()
@@ -210,15 +209,16 @@ class TextEncodeQwenImageEditFusion(io.ComfyNode):
                     max=1.0,
                     step=0.01,
                     advanced=True,
-                    tooltip="For two sources, the probability of selecting the first source. Three or more sources are selected uniformly.",
+                    tooltip="Probability of selecting the first source. Remaining sources are selected with a checkerboard pattern.",
                 ),
+                io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff, control_after_generate=True, advanced=True, tooltip="Seed for the spatial-dither-random pattern."),
                 io.Vae.Input("vae", optional=True),
             ],
             outputs=[io.Conditioning.Output()],
         )
 
     @classmethod
-    def execute(cls, clip, prompt, images: io.Autogrow.Type, fusion_method, block_size=2, dither_ratio=0.5, vae=None) -> io.NodeOutput:
+    def execute(cls, clip, prompt, images: io.Autogrow.Type, fusion_method, block_size=2, dither_ratio=0.5, vae=None, seed=0) -> io.NodeOutput:
         sources = _flatten_images(images)
         if len(sources) < 2:
             raise ValueError("Visual fusion requires at least two images.")
@@ -250,7 +250,7 @@ class TextEncodeQwenImageEditFusion(io.ComfyNode):
             raise ValueError("Visual fusion requires a Qwen3-VL or Krea2 text encoder.")
 
         conditionings = [clip.encode_from_tokens_scheduled(source_tokens) for source_tokens in tokens]
-        conditioning = _fuse_conditionings(conditionings, tokens, visual_height, visual_width, fusion_method, block_size, dither_ratio)
+        conditioning = _fuse_conditionings(conditionings, tokens, visual_height, visual_width, fusion_method, block_size, dither_ratio, seed)
 
         if vae is not None:
             ref_latents = []

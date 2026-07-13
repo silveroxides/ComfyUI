@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from comfy.cli_args import args as cli_args
@@ -34,12 +35,26 @@ def test_block_interleave_mask():
     ]
 
 
-def test_dither_mask_is_deterministic_and_honors_two_source_ratio():
-    first = _spatial_fusion_mask(4, 4, 2, "spatial-dither-random", 2, 0.5, "cpu")
-    second = _spatial_fusion_mask(4, 4, 2, "spatial-dither-random", 2, 0.5, "cpu")
+def test_dither_mask_honors_seed_and_two_source_ratio():
+    first = _spatial_fusion_mask(4, 4, 2, "spatial-dither-random", 2, 0.5, "cpu", 7)
+    second = _spatial_fusion_mask(4, 4, 2, "spatial-dither-random", 2, 0.5, "cpu", 7)
+    changed = _spatial_fusion_mask(4, 4, 2, "spatial-dither-random", 2, 0.5, "cpu", 8)
     assert torch.equal(first, second)
+    assert not torch.equal(first, changed)
     assert _spatial_fusion_mask(2, 2, 2, "spatial-dither-random", 2, 1.0, "cpu").tolist() == [0, 0, 0, 0]
     assert _spatial_fusion_mask(2, 2, 2, "spatial-dither-random", 2, 0.0, "cpu").tolist() == [1, 1, 1, 1]
+
+
+def test_dither_ratio_selects_first_source_or_remaining_checkerboard():
+    assert _spatial_fusion_mask(2, 3, 4, "spatial-dither-random", 2, 1.0, "cpu").tolist() == [0, 0, 0, 0, 0, 0]
+    assert _spatial_fusion_mask(2, 3, 4, "spatial-dither-random", 2, 0.0, "cpu").tolist() == [1, 2, 3, 2, 3, 1]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+def test_dither_mask_is_seeded_on_cuda():
+    first = _spatial_fusion_mask(4, 4, 3, "spatial-dither-random", 2, 0.5, "cuda", 7)
+    second = _spatial_fusion_mask(4, 4, 3, "spatial-dither-random", 2, 0.5, "cuda", 7)
+    assert torch.equal(first, second)
 
 
 def test_visual_span_accounts_for_stripped_prefix():
@@ -64,6 +79,19 @@ def test_fusion_replaces_only_visual_tokens_and_preserves_dtype_and_metadata():
     assert output.flatten().tolist() == [10, 10, 30, 30, 10, 20]
     assert output_metadata == metadata
     assert output_metadata is not metadata
+
+
+def test_dither_seed_changes_fused_conditioning():
+    tokens = [_tokens(), _tokens()]
+    conditionings = [
+        [[torch.zeros((1, 6, 1)), {}]],
+        [[torch.ones((1, 6, 1)), {}]],
+    ]
+
+    first = _fuse_conditionings(conditionings, tokens, 2, 2, "spatial-dither-random", 2, 0.5, 7)[0][0]
+    second = _fuse_conditionings(conditionings, tokens, 2, 2, "spatial-dither-random", 2, 0.5, 8)[0][0]
+
+    assert not torch.equal(first, second)
 
 
 def test_flatten_images_uses_numeric_input_order_and_splits_batches():
@@ -98,7 +126,15 @@ def test_node_uses_custom_krea_prompt_and_returns_fused_conditioning():
         FakeClip(),
         "test prompt",
         {"image_1": torch.zeros(1, 32, 32, 3), "image_2": torch.ones(1, 32, 32, 3)},
-        "spatial-checkerboard",
+        "spatial-dither-random",
+        seed=7,
+    )
+    changed_seed = TextEncodeQwenImageEditFusion.execute(
+        FakeClip(),
+        "test prompt",
+        {"image_1": torch.zeros(1, 32, 32, 3), "image_2": torch.ones(1, 32, 32, 3)},
+        "spatial-dither-random",
+        seed=8,
     )
     conditioning = result.args[0]
     output, metadata = conditioning[0]
@@ -109,3 +145,10 @@ def test_node_uses_custom_krea_prompt_and_returns_fused_conditioning():
     assert output[:, -1].item() == 0.0
     assert set(output[:, 1:-1].flatten().tolist()) == {0.0, 1.0}
     assert metadata == {"source": 0.0}
+    assert not torch.equal(output, changed_seed.args[0][0][0])
+
+
+def test_node_exposes_seed_control():
+    inputs = {value.id: value for value in TextEncodeQwenImageEditFusion.define_schema().inputs}
+    assert inputs["seed"].default == 0
+    assert inputs["seed"].control_after_generate is True
