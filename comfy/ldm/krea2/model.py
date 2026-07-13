@@ -368,7 +368,7 @@ class SingleStreamDiT(nn.Module):
             for i, ref in enumerate(ref_latents):
                 if ref.ndim == 5:
                     ref_b5, ref_c5, ref_t5, ref_h5, ref_w5 = ref.shape
-                    ref = ref.reshape(ref_b5 * ref_t5, ref_c5, ref_h5, ref_w5)
+                    ref = ref.movedim(2, 1).reshape(ref_b5 * ref_t5, ref_c5, ref_h5, ref_w5)
                 ref_pad = comfy.ldm.common_dit.pad_to_patch_size(ref, (patch, patch))
                 ref_pad = comfy.utils.repeat_to_batch_size(ref_pad, bs)
                 ref_pad = ref_pad.to(device=device, dtype=dtype)
