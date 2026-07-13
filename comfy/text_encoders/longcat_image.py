@@ -79,8 +79,9 @@ class LongCatImageTokenizer(sd1_clip.SD1Tokenizer):
             tokenizer=LongCatImageBaseTokenizer,
         )
 
-    def tokenize_with_weights(self, text, return_word_ids=False, images=None, **kwargs):
-        skip_template = False
+    def tokenize_with_weights(self, text, return_word_ids=False, images=None, skip_template=False, **kwargs):
+        if skip_template:
+            skip_template = True
         if text.startswith("<|im_start|>"):
             skip_template = True
         if text.startswith("<|start_header_id|>"):

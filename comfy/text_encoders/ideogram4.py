@@ -32,14 +32,14 @@ class Ideogram4Tokenizer(sd1_clip.SD1Tokenizer):
 
         self.llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, skip_template=False, **kwargs):
         if text.startswith('<|im_start|>'):
             llama_text = text
         elif llama_template is None:
             llama_text = self.llama_template.format(text)
         else:
             llama_text = llama_template.format(text)
-        return super().tokenize_with_weights(llama_text, return_word_ids=return_word_ids, disable_weights=True, **kwargs)
+        return super().tokenize_with_weights(llama_text, return_word_ids=return_word_ids, disable_weights=True, skip_template=skip_template, **kwargs)
 
 
 # Qwen3-VL-8B = 5e6 (vs plain Qwen3-8B's 1e6)
