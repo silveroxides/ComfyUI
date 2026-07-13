@@ -1,5 +1,10 @@
 import torch
 
+from comfy.cli_args import args as cli_args
+
+if not torch.cuda.is_available():
+    cli_args.cpu = True
+
 from comfy_extras.nodes_qwen import TextEncodeQwenImageEditFusion, _flatten_images, _fuse_conditionings, _spatial_fusion_mask, _visual_token_span
 
 
