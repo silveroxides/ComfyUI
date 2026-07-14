@@ -1,5 +1,6 @@
 import node_helpers
 import comfy.utils
+import comfy.text_encoders.krea2
 import math
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
@@ -80,6 +81,54 @@ def _flatten_images(images):
     return sources
 
 
+def _visual_token_indices(total, ratio, method):
+    if not 0.0 <= ratio <= 1.0:
+        raise ValueError("Visual token ratio must be between 0.0 and 1.0.")
+    selected = round(total * ratio)
+    if selected == 0:
+        return []
+    if method == "uniform-grid":
+        return [math.floor((i + 0.5) * total / selected) for i in range(selected)]
+    if method == "legacy-tail":
+        return list(range(total - selected, total))
+    raise ValueError(f"Unsupported visual token selection method: {method}")
+
+
+def _select_visual_tokens(conditioning, tokens, visual_tokens, selected_indices):
+    selected_indices = list(selected_indices)
+    output = []
+    for cond, metadata in conditioning:
+        start, end = _visual_token_span(tokens, cond.shape[1], visual_tokens)
+        keep = list(range(start)) + [start + index for index in selected_indices] + list(range(end, cond.shape[1]))
+        selected = cond[:, keep]
+        selected_metadata = metadata.copy()
+        attention_mask = selected_metadata.get("attention_mask")
+        if attention_mask is not None:
+            selected_metadata["attention_mask"] = attention_mask[:, keep]
+        output.append([selected, selected_metadata])
+    return output
+
+
+def _visual_token_diagnostic(image, grid_height, grid_width, selected_indices):
+    diagnostic = image.clone()
+    selected = set(selected_indices)
+    height, width = image.shape[1:3]
+    for index in range(grid_height * grid_width):
+        row, column = divmod(index, grid_width)
+        top = round(row * height / grid_height)
+        bottom = round((row + 1) * height / grid_height)
+        left = round(column * width / grid_width)
+        right = round((column + 1) * width / grid_width)
+        if index not in selected:
+            diagnostic[:, top:bottom, left:right] *= 0.2
+        else:
+            diagnostic[:, top:min(top + 2, bottom), left:right] = 1.0
+            diagnostic[:, max(top, bottom - 2):bottom, left:right] = 1.0
+            diagnostic[:, top:bottom, left:min(left + 2, right)] = 1.0
+            diagnostic[:, top:bottom, max(left, right - 2):right] = 1.0
+    return diagnostic
+
+
 class TextEncodeQwenImageEdit(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -121,6 +170,54 @@ class TextEncodeQwenImageEdit(io.ComfyNode):
         if ref_latent is not None:
             conditioning = node_helpers.conditioning_set_values(conditioning, {"reference_latents": [ref_latent]}, append=True)
         return io.NodeOutput(conditioning)
+
+
+class TextEncodeKrea2VisualTokenControl(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="TextEncodeKrea2VisualTokenControl",
+            display_name="Text Encode Krea 2 Visual Token Control",
+            category="model/conditioning/qwen image",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True),
+                io.Image.Input("image"),
+                io.Combo.Input("visual_resolution", options=[384, 512, 768, 1024], default=1024),
+                io.Float.Input("visual_token_ratio", default=1.0, min=0.0, max=1.0, step=0.001),
+                io.Combo.Input("selection_method", options=["uniform-grid", "legacy-tail"], default="uniform-grid"),
+            ],
+            outputs=[io.Conditioning.Output(), io.Image.Output()],
+        )
+
+    @classmethod
+    def execute(cls, clip, prompt, image, visual_resolution=1024, visual_token_ratio=1.0, selection_method="uniform-grid") -> io.NodeOutput:
+        if image.ndim != 4 or image.shape[0] != 1:
+            raise ValueError("Krea 2 visual token control requires exactly one image.")
+        if not isinstance(clip.cond_stage_model, comfy.text_encoders.krea2.Krea2TEModel):
+            raise ValueError("Krea 2 visual token control requires a Krea 2 text encoder.")
+
+        samples = image[:, :, :, :3].movedim(-1, 1)
+        scale_by = math.sqrt((visual_resolution * visual_resolution) / (samples.shape[2] * samples.shape[3]))
+        width = max(32, round(samples.shape[3] * scale_by))
+        height = max(32, round(samples.shape[2] * scale_by))
+        resized = comfy.utils.common_upscale(samples, width, height, "area", "disabled").movedim(1, -1)
+
+        grid_height = max(1, round(height / 32))
+        grid_width = max(1, round(width / 32))
+        visual_tokens = grid_height * grid_width
+        selected_indices = _visual_token_indices(visual_tokens, visual_token_ratio, selection_method)
+
+        full_prompt = (
+            "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n"
+            "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>" + prompt + "<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        tokens = clip.tokenize(full_prompt, images=[resized])
+        conditioning = clip.encode_from_tokens_scheduled(tokens)
+        conditioning = _select_visual_tokens(conditioning, tokens, visual_tokens, selected_indices)
+        diagnostic = _visual_token_diagnostic(resized, grid_height, grid_width, selected_indices)
+        return io.NodeOutput(conditioning, diagnostic)
 
 
 class TextEncodeQwenImageEditPlus(io.ComfyNode):
@@ -295,6 +392,7 @@ class QwenExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             TextEncodeQwenImageEdit,
+            TextEncodeKrea2VisualTokenControl,
             TextEncodeQwenImageEditPlus,
             TextEncodeQwenImageEditFusion,
             EmptyQwenImageLayeredLatentImage,

@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 import torch
 
@@ -8,7 +10,7 @@ if not torch.cuda.is_available():
     cli_args.cpu = True
 
 try:
-    from comfy_extras.nodes_qwen import TextEncodeQwenImageEditFusion, _flatten_images, _fuse_conditionings, _spatial_fusion_mask, _visual_token_span
+    from comfy_extras.nodes_qwen import QwenExtension, TextEncodeKrea2VisualTokenControl, TextEncodeQwenImageEditFusion, _flatten_images, _fuse_conditionings, _select_visual_tokens, _spatial_fusion_mask, _visual_token_indices, _visual_token_span
 finally:
     cli_args.cpu = prior_cpu
 
@@ -60,6 +62,36 @@ def test_dither_mask_is_seeded_on_cuda():
 def test_visual_span_accounts_for_stripped_prefix():
     tokens = _tokens(image_position=3, suffix=4)
     assert _visual_token_span(tokens, cond_length=9, visual_tokens=4) == (1, 5)
+
+
+@pytest.mark.parametrize("ratio, expected", [(0.0, []), (0.5, [1, 3]), (1.0, [0, 1, 2, 3])])
+def test_uniform_visual_token_indices(ratio, expected):
+    assert _visual_token_indices(4, ratio, "uniform-grid") == expected
+
+
+def test_legacy_tail_visual_token_indices():
+    assert _visual_token_indices(8, 0.25, "legacy-tail") == [6, 7]
+
+
+def test_visual_token_ratio_boundaries():
+    with pytest.raises(ValueError, match="between 0.0 and 1.0"):
+        _visual_token_indices(8, -0.01, "uniform-grid")
+    with pytest.raises(ValueError, match="between 0.0 and 1.0"):
+        _visual_token_indices(8, 1.01, "uniform-grid")
+
+
+def test_krea_visual_token_node_is_registered():
+    assert TextEncodeKrea2VisualTokenControl in asyncio.run(QwenExtension().get_node_list())
+
+
+def test_select_visual_tokens_preserves_order_and_slices_attention_mask():
+    conditioning = [[torch.arange(7).reshape(1, 7, 1), {"attention_mask": torch.ones(1, 7), "marker": True}]]
+    selected = _select_visual_tokens(conditioning, _tokens(image_position=3, suffix=1), 4, [1, 3])
+    cond, metadata = selected[0]
+
+    assert cond.flatten().tolist() == [0, 1, 3, 5, 6]
+    assert metadata["attention_mask"].shape == (1, 5)
+    assert metadata["marker"] is True
 
 
 def test_fusion_replaces_only_visual_tokens_and_preserves_dtype_and_metadata():
