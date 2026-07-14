@@ -10,7 +10,7 @@ if not torch.cuda.is_available():
     cli_args.cpu = True
 
 try:
-    from comfy_extras.nodes_qwen import Krea2ExperimentEvaluate, QwenExtension, TextEncodeKrea2VisualTokenControl, TextEncodeQwenImageEditFusion, _flatten_images, _fuse_conditionings, _select_visual_tokens, _spatial_fusion_mask, _visual_token_indices, _visual_token_span
+    from comfy_extras.nodes_qwen import KREA2_EXPERIMENT_CONFIG, Krea2ExperimentConfiguration, Krea2ExperimentEvaluate, QwenExtension, TextEncodeKrea2VisualTokenControl, TextEncodeQwenImageEditFusion, _flatten_images, _fuse_conditionings, _select_visual_tokens, _spatial_fusion_mask, _visual_token_indices, _visual_token_span
 finally:
     cli_args.cpu = prior_cpu
 
@@ -83,7 +83,15 @@ def test_visual_token_ratio_boundaries():
 def test_krea_visual_token_node_is_registered():
     nodes = asyncio.run(QwenExtension().get_node_list())
     assert TextEncodeKrea2VisualTokenControl in nodes
+    assert Krea2ExperimentConfiguration in nodes
     assert Krea2ExperimentEvaluate in nodes
+
+
+def test_krea_experiment_configuration_selects_index_and_returns_record():
+    output = Krea2ExperimentConfiguration.execute(KREA2_EXPERIMENT_CONFIG, 0).args
+    assert output[0].startswith("Apply the requested edit")
+    assert output[2:5] == (1024, 1.0, "uniform-grid")
+    assert output[-1]["case_name"] == "1024-full"
 
 
 def test_select_visual_tokens_preserves_order_and_slices_attention_mask():

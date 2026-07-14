@@ -16,6 +16,26 @@ import nodes
 Krea2Experiment = io.Custom("KREA2_EXPERIMENT")
 
 
+KREA2_EXPERIMENT_CONFIG = """[
+  {
+    "case_name": "1024-full",
+    "prompt": "Apply the requested edit while preserving everything else.",
+    "negative_prompt": "",
+    "visual_resolution": 1024,
+    "visual_token_ratio": 1.0,
+    "selection_method": "uniform-grid",
+    "seed": 1,
+    "steps": 20,
+    "cfg": 1.0,
+    "sampler_name": "euler",
+    "scheduler": "normal",
+    "denoise": 1.0,
+    "width": 1024,
+    "height": 1024
+  }
+]"""
+
+
 def _spatial_fusion_mask(height, width, num_sources, method, block_size, dither_ratio, device, seed=0):
     rows = torch.arange(height, device=device).unsqueeze(1)
     columns = torch.arange(width, device=device).unsqueeze(0)
@@ -251,6 +271,47 @@ class TextEncodeKrea2VisualTokenControl(io.ComfyNode):
         return io.NodeOutput(conditioning, diagnostic, experiment)
 
 
+class Krea2ExperimentConfiguration(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        outputs = [
+            io.AnyType.Output(display_name=name) for name in (
+                "prompt", "negative_prompt", "visual_resolution", "visual_token_ratio", "selection_method",
+                "seed", "steps", "cfg", "sampler_name", "scheduler", "denoise", "width", "height", "case_name",
+            )
+        ]
+        outputs.append(Krea2Experiment.Output(display_name="configuration"))
+        return io.Schema(
+            node_id="Krea2ExperimentConfiguration",
+            display_name="Krea 2 Experiment Configuration",
+            category="model/conditioning/qwen image",
+            inputs=[
+                io.String.Input("configurations", default=KREA2_EXPERIMENT_CONFIG, multiline=True),
+                io.Int.Input("index", default=0, min=0, max=0xffffffffffffffff),
+            ],
+            outputs=outputs,
+        )
+
+    @classmethod
+    def execute(cls, configurations, index=0) -> io.NodeOutput:
+        values = json.loads(configurations)
+        if not isinstance(values, list) or not values:
+            raise ValueError("Krea 2 experiment configurations must be a non-empty JSON list.")
+        if index >= len(values):
+            raise ValueError(f"Krea 2 experiment configuration index {index} is out of range for {len(values)} configurations.")
+        configuration = values[index]
+        if not isinstance(configuration, dict):
+            raise ValueError("Each Krea 2 experiment configuration must be a JSON object.")
+        required = (
+            "prompt", "negative_prompt", "visual_resolution", "visual_token_ratio", "selection_method",
+            "seed", "steps", "cfg", "sampler_name", "scheduler", "denoise", "width", "height", "case_name",
+        )
+        missing = [name for name in required if name not in configuration]
+        if missing:
+            raise ValueError(f"Krea 2 experiment configuration is missing: {', '.join(missing)}")
+        return io.NodeOutput(*(configuration[name] for name in required), configuration.copy())
+
+
 def _image_similarity(source, generated):
     source = source[:, :, :, :3].movedim(-1, 1)
     generated = generated[:, :, :, :3].movedim(-1, 1)
@@ -277,21 +338,17 @@ class Krea2ExperimentEvaluate(io.ComfyNode):
                 io.Image.Input("source_image"),
                 io.Image.Input("generated_image"),
                 Krea2Experiment.Input("experiment"),
-                io.String.Input("case_name", default="default"),
-                io.String.Input("run_parameters", default="{}", multiline=True),
+                Krea2Experiment.Input("configuration"),
                 io.String.Input("results_file", default="krea2_visual_token_results.jsonl"),
             ],
             outputs=[io.String.Output(display_name="result")],
         )
 
     @classmethod
-    def execute(cls, source_image, generated_image, experiment, case_name="default", run_parameters="{}", results_file="krea2_visual_token_results.jsonl") -> io.NodeOutput:
+    def execute(cls, source_image, generated_image, experiment, configuration, results_file="krea2_visual_token_results.jsonl") -> io.NodeOutput:
         if source_image.shape[0] != 1 or generated_image.shape[0] != 1:
             raise ValueError("Krea 2 experiment evaluation requires one source and one generated image.")
-        parameters = json.loads(run_parameters)
-        if not isinstance(parameters, dict):
-            raise ValueError("Krea 2 experiment run parameters must be a JSON object.")
-        result = {"case_name": case_name, "run_parameters": parameters, **experiment, **_image_similarity(source_image, generated_image)}
+        result = {"configuration": configuration, **experiment, **_image_similarity(source_image, generated_image)}
         result_json = json.dumps(result, sort_keys=True)
         output_dir = os.path.abspath(folder_paths.get_output_directory())
         path = os.path.abspath(os.path.join(output_dir, results_file))
@@ -476,6 +533,7 @@ class QwenExtension(ComfyExtension):
         return [
             TextEncodeQwenImageEdit,
             TextEncodeKrea2VisualTokenControl,
+            Krea2ExperimentConfiguration,
             Krea2ExperimentEvaluate,
             TextEncodeQwenImageEditPlus,
             TextEncodeQwenImageEditFusion,
