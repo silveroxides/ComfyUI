@@ -10,7 +10,7 @@ if not torch.cuda.is_available():
     cli_args.cpu = True
 
 try:
-    from comfy_extras.nodes_qwen import QwenExtension, TextEncodeKrea2VisualTokenControl, TextEncodeQwenImageEditFusion, _flatten_images, _fuse_conditionings, _select_visual_tokens, _spatial_fusion_mask, _visual_token_indices, _visual_token_span
+    from comfy_extras.nodes_qwen import Krea2ExperimentEvaluate, QwenExtension, TextEncodeKrea2VisualTokenControl, TextEncodeQwenImageEditFusion, _flatten_images, _fuse_conditionings, _select_visual_tokens, _spatial_fusion_mask, _visual_token_indices, _visual_token_span
 finally:
     cli_args.cpu = prior_cpu
 
@@ -64,24 +64,26 @@ def test_visual_span_accounts_for_stripped_prefix():
     assert _visual_token_span(tokens, cond_length=9, visual_tokens=4) == (1, 5)
 
 
-@pytest.mark.parametrize("ratio, expected", [(0.0, []), (0.5, [1, 3]), (1.0, [0, 1, 2, 3])])
+@pytest.mark.parametrize("ratio, expected", [(0.0, []), (0.25, [5, 7, 13, 15]), (1.0, list(range(16)))])
 def test_uniform_visual_token_indices(ratio, expected):
-    assert _visual_token_indices(4, ratio, "uniform-grid") == expected
+    assert _visual_token_indices(4, 4, ratio, "uniform-grid") == expected
 
 
 def test_legacy_tail_visual_token_indices():
-    assert _visual_token_indices(8, 0.25, "legacy-tail") == [6, 7]
+    assert _visual_token_indices(2, 4, 0.25, "legacy-tail") == [6, 7]
 
 
 def test_visual_token_ratio_boundaries():
     with pytest.raises(ValueError, match="between 0.0 and 1.0"):
-        _visual_token_indices(8, -0.01, "uniform-grid")
+        _visual_token_indices(2, 4, -0.01, "uniform-grid")
     with pytest.raises(ValueError, match="between 0.0 and 1.0"):
-        _visual_token_indices(8, 1.01, "uniform-grid")
+        _visual_token_indices(2, 4, 1.01, "uniform-grid")
 
 
 def test_krea_visual_token_node_is_registered():
-    assert TextEncodeKrea2VisualTokenControl in asyncio.run(QwenExtension().get_node_list())
+    nodes = asyncio.run(QwenExtension().get_node_list())
+    assert TextEncodeKrea2VisualTokenControl in nodes
+    assert Krea2ExperimentEvaluate in nodes
 
 
 def test_select_visual_tokens_preserves_order_and_slices_attention_mask():

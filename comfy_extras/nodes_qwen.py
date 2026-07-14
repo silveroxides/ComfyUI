@@ -1,12 +1,19 @@
 import node_helpers
 import comfy.utils
 import comfy.text_encoders.krea2
+import folder_paths
+import json
 import math
+import os
+import time
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 import comfy.model_management
 import torch
 import nodes
+
+
+Krea2Experiment = io.Custom("KREA2_EXPERIMENT")
 
 
 def _spatial_fusion_mask(height, width, num_sources, method, block_size, dither_ratio, device, seed=0):
@@ -81,14 +88,25 @@ def _flatten_images(images):
     return sources
 
 
-def _visual_token_indices(total, ratio, method):
+def _visual_token_indices(grid_height, grid_width, ratio, method):
     if not 0.0 <= ratio <= 1.0:
         raise ValueError("Visual token ratio must be between 0.0 and 1.0.")
+    total = grid_height * grid_width
     selected = round(total * ratio)
     if selected == 0:
         return []
     if method == "uniform-grid":
-        return [math.floor((i + 0.5) * total / selected) for i in range(selected)]
+        selected_rows = round(math.sqrt(selected * grid_height / grid_width))
+        selected_rows = min(grid_height, selected, max(math.ceil(selected / grid_width), selected_rows, 1))
+        rows = [math.floor((i + 0.5) * grid_height / selected_rows) for i in range(selected_rows)]
+        base_columns, extra_rows = divmod(selected, selected_rows)
+        extra = set(math.floor((i + 0.5) * selected_rows / extra_rows) for i in range(extra_rows)) if extra_rows else set()
+        indices = []
+        for i, row in enumerate(rows):
+            column_count = base_columns + (i in extra)
+            columns = [math.floor((j + 0.5) * grid_width / column_count) for j in range(column_count)]
+            indices.extend(row * grid_width + column for column in columns)
+        return sorted(indices)
     if method == "legacy-tail":
         return list(range(total - selected, total))
     raise ValueError(f"Unsupported visual token selection method: {method}")
@@ -187,7 +205,7 @@ class TextEncodeKrea2VisualTokenControl(io.ComfyNode):
                 io.Float.Input("visual_token_ratio", default=1.0, min=0.0, max=1.0, step=0.001),
                 io.Combo.Input("selection_method", options=["uniform-grid", "legacy-tail"], default="uniform-grid"),
             ],
-            outputs=[io.Conditioning.Output(), io.Image.Output()],
+            outputs=[io.Conditioning.Output(), io.Image.Output(), Krea2Experiment.Output()],
         )
 
     @classmethod
@@ -206,7 +224,7 @@ class TextEncodeKrea2VisualTokenControl(io.ComfyNode):
         grid_height = max(1, round(height / 32))
         grid_width = max(1, round(width / 32))
         visual_tokens = grid_height * grid_width
-        selected_indices = _visual_token_indices(visual_tokens, visual_token_ratio, selection_method)
+        selected_indices = _visual_token_indices(grid_height, grid_width, visual_token_ratio, selection_method)
 
         full_prompt = (
             "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n"
@@ -214,10 +232,75 @@ class TextEncodeKrea2VisualTokenControl(io.ComfyNode):
             "<|im_start|>assistant\n"
         )
         tokens = clip.tokenize(full_prompt, images=[resized])
+        encode_started = time.perf_counter()
         conditioning = clip.encode_from_tokens_scheduled(tokens)
+        encode_seconds = time.perf_counter() - encode_started
         conditioning = _select_visual_tokens(conditioning, tokens, visual_tokens, selected_indices)
         diagnostic = _visual_token_diagnostic(resized, grid_height, grid_width, selected_indices)
-        return io.NodeOutput(conditioning, diagnostic)
+        experiment = {
+            "prompt": prompt,
+            "visual_resolution": visual_resolution,
+            "visual_token_ratio": visual_token_ratio,
+            "selection_method": selection_method,
+            "grid_height": grid_height,
+            "grid_width": grid_width,
+            "total_visual_tokens": visual_tokens,
+            "selected_visual_tokens": len(selected_indices),
+            "encode_seconds": encode_seconds,
+        }
+        return io.NodeOutput(conditioning, diagnostic, experiment)
+
+
+def _image_similarity(source, generated):
+    source = source[:, :, :, :3].movedim(-1, 1)
+    generated = generated[:, :, :, :3].movedim(-1, 1)
+    if generated.shape[2:] != source.shape[2:]:
+        generated = comfy.utils.common_upscale(generated, source.shape[3], source.shape[2], "area", "disabled")
+    difference = generated - source
+    mse = difference.square().mean().item()
+    mae = difference.abs().mean().item()
+    source_centered = source - source.mean()
+    generated_centered = generated - generated.mean()
+    cosine = torch.nn.functional.cosine_similarity(source_centered.flatten(), generated_centered.flatten(), dim=0).item()
+    return {"mse": mse, "mae": mae, "psnr": -10.0 * math.log10(max(mse, 1e-12)), "pixel_cosine": cosine}
+
+
+class Krea2ExperimentEvaluate(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="Krea2ExperimentEvaluate",
+            display_name="Evaluate Krea 2 Experiment",
+            category="model/conditioning/qwen image",
+            is_output_node=True,
+            inputs=[
+                io.Image.Input("source_image"),
+                io.Image.Input("generated_image"),
+                Krea2Experiment.Input("experiment"),
+                io.String.Input("case_name", default="default"),
+                io.String.Input("run_parameters", default="{}", multiline=True),
+                io.String.Input("results_file", default="krea2_visual_token_results.jsonl"),
+            ],
+            outputs=[io.String.Output(display_name="result")],
+        )
+
+    @classmethod
+    def execute(cls, source_image, generated_image, experiment, case_name="default", run_parameters="{}", results_file="krea2_visual_token_results.jsonl") -> io.NodeOutput:
+        if source_image.shape[0] != 1 or generated_image.shape[0] != 1:
+            raise ValueError("Krea 2 experiment evaluation requires one source and one generated image.")
+        parameters = json.loads(run_parameters)
+        if not isinstance(parameters, dict):
+            raise ValueError("Krea 2 experiment run parameters must be a JSON object.")
+        result = {"case_name": case_name, "run_parameters": parameters, **experiment, **_image_similarity(source_image, generated_image)}
+        result_json = json.dumps(result, sort_keys=True)
+        output_dir = os.path.abspath(folder_paths.get_output_directory())
+        path = os.path.abspath(os.path.join(output_dir, results_file))
+        if os.path.commonpath([output_dir, path]) != output_dir:
+            raise ValueError("Experiment results file must be inside the ComfyUI output directory.")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as output:
+            output.write(result_json + "\n")
+        return io.NodeOutput(result_json)
 
 
 class TextEncodeQwenImageEditPlus(io.ComfyNode):
@@ -393,6 +476,7 @@ class QwenExtension(ComfyExtension):
         return [
             TextEncodeQwenImageEdit,
             TextEncodeKrea2VisualTokenControl,
+            Krea2ExperimentEvaluate,
             TextEncodeQwenImageEditPlus,
             TextEncodeQwenImageEditFusion,
             EmptyQwenImageLayeredLatentImage,
