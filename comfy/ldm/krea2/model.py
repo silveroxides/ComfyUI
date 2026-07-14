@@ -228,7 +228,7 @@ class SingleStreamDiT(nn.Module):
             comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, transformer_options),
         ).execute(x, timesteps, context, attention_mask, transformer_options, **kwargs)
 
-    def _forward(self, x, timesteps, context, attention_mask=None, transformer_options={}, krea2_visual_coords=None, krea2_spatial_strength=1.0, **kwargs):
+    def _forward(self, x, timesteps, context, attention_mask=None, transformer_options={}, **kwargs):
         temporal = x.ndim == 5
         if temporal:
             b5, c5, t5, h5, w5 = x.shape
@@ -258,12 +258,6 @@ class SingleStreamDiT(nn.Module):
         # Position ids: text at 0, image at (0, h_idx, w_idx).
         device = combined.device
         txtpos = torch.zeros(bs, txtlen, 3, device=device, dtype=torch.float32)
-        if krea2_visual_coords is not None:
-            if krea2_visual_coords.shape[:2] != (bs, txtlen) or krea2_visual_coords.shape[-1] != 2:
-                raise ValueError(f"Krea 2 visual coordinates must have shape ({bs}, {txtlen}, 2), got {tuple(krea2_visual_coords.shape)}.")
-            visual_coords = krea2_visual_coords.to(device=device, dtype=torch.float32)
-            txtpos[..., 1] = visual_coords[..., 0] * max(h_ - 1, 0) * krea2_spatial_strength
-            txtpos[..., 2] = visual_coords[..., 1] * max(w_ - 1, 0) * krea2_spatial_strength
         imgids = torch.zeros(h_, w_, 3, device=device, dtype=torch.float32)
         imgids[..., 1] = torch.arange(h_, device=device, dtype=torch.float32)[:, None]
         imgids[..., 2] = torch.arange(w_, device=device, dtype=torch.float32)[None, :]

@@ -80,47 +80,6 @@ def _flatten_images(images):
     return sources
 
 
-def _krea2_visual_coordinates(tokens, cond_length, visual_height, visual_width, device):
-    visual_tokens = visual_height * visual_width
-    start, end = _visual_token_span(tokens, cond_length, visual_tokens)
-    rows = torch.linspace(0.0, 1.0, visual_height, device=device)
-    columns = torch.linspace(0.0, 1.0, visual_width, device=device)
-    coordinates = torch.zeros((1, cond_length, 2), device=device)
-    coordinates[0, start:end, 0] = rows[:, None].expand(-1, visual_width).flatten()
-    coordinates[0, start:end, 1] = columns[None, :].expand(visual_height, -1).flatten()
-    return coordinates
-
-
-def _qwen3vl_visual_grid(height, width):
-    factor = 32
-    resized_height = round(height / factor) * factor
-    resized_width = round(width / factor) * factor
-    pixels = resized_height * resized_width
-    if pixels > 12845056:
-        scale = math.sqrt((height * width) / 12845056)
-        resized_height = max(factor, math.floor(height / scale / factor) * factor)
-        resized_width = max(factor, math.floor(width / scale / factor) * factor)
-    elif pixels < 3136:
-        scale = math.sqrt(3136 / (height * width))
-        resized_height = math.ceil(height * scale / factor) * factor
-        resized_width = math.ceil(width * scale / factor) * factor
-    return resized_height // factor, resized_width // factor
-
-
-def _visual_grid_overlay(image, visual_height, visual_width):
-    overlay = image.clone()
-    height, width = overlay.shape[1:3]
-    line_width = max(1, min(height, width) // 256)
-    color = overlay.new_tensor([1.0, 0.0, 0.0])
-    for row in range(1, visual_height):
-        y = round(row * height / visual_height)
-        overlay[:, max(0, y - line_width // 2):min(height, y + (line_width + 1) // 2), :, :3] = color
-    for column in range(1, visual_width):
-        x = round(column * width / visual_width)
-        overlay[:, :, max(0, x - line_width // 2):min(width, x + (line_width + 1) // 2), :3] = color
-    return overlay
-
-
 class TextEncodeQwenImageEdit(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -307,59 +266,6 @@ class TextEncodeQwenImageEditFusion(io.ComfyNode):
         return io.NodeOutput(conditioning)
 
 
-class TextEncodeKrea2SpatialEdit(io.ComfyNode):
-    @classmethod
-    def define_schema(cls):
-        return io.Schema(
-            node_id="TextEncodeKrea2SpatialEdit",
-            display_name="Text Encode Krea 2 Spatial Edit (Experimental)",
-            category="model/conditioning/qwen image",
-            description="Assigns the expanded Qwen3-VL visual tokens spatial positions in Krea 2 attention without a reference latent.",
-            inputs=[
-                io.Clip.Input("clip"),
-                io.String.Input("prompt", multiline=True, dynamic_prompts=True),
-                io.Image.Input("image"),
-                io.Float.Input("spatial_strength", default=1.0, min=0.0, max=2.0, step=0.05),
-            ],
-            outputs=[
-                io.Conditioning.Output(),
-                io.Image.Output(display_name="token_grid"),
-            ],
-        )
-
-    @classmethod
-    def execute(cls, clip, prompt, image, spatial_strength=1.0) -> io.NodeOutput:
-        if image.ndim == 3:
-            image = image.unsqueeze(0)
-        if image.shape[0] != 1:
-            raise ValueError("Krea 2 spatial edit requires exactly one image.")
-
-        samples = image[:, :, :, :3].movedim(-1, 1)
-        scale_by = math.sqrt((384 * 384) / (samples.shape[3] * samples.shape[2]))
-        width = max(32, round(samples.shape[3] * scale_by))
-        height = max(32, round(samples.shape[2] * scale_by))
-        processed = comfy.utils.common_upscale(samples, width, height, "area", "disabled").movedim(1, -1)
-
-        visual_height, visual_width = _qwen3vl_visual_grid(height, width)
-        full_prompt = (
-            "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n"
-            "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>" + prompt + "<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        )
-        tokens = clip.tokenize(full_prompt, images=[processed])
-        if next(iter(tokens), None) != "qwen3vl_4b":
-            raise ValueError("Krea 2 spatial edit requires a Krea 2 text encoder.")
-
-        conditioning = clip.encode_from_tokens_scheduled(tokens)
-        for cond, metadata in conditioning:
-            if cond.shape[-1] != 12 * 2560:
-                raise ValueError("Krea 2 spatial edit requires a Krea 2 text encoder.")
-            metadata["krea2_visual_coords"] = _krea2_visual_coordinates(tokens, cond.shape[1], visual_height, visual_width, cond.device)
-            metadata["krea2_spatial_strength"] = spatial_strength
-
-        return io.NodeOutput(conditioning, _visual_grid_overlay(processed, visual_height, visual_width))
-
-
 class EmptyQwenImageLayeredLatentImage(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -391,7 +297,6 @@ class QwenExtension(ComfyExtension):
             TextEncodeQwenImageEdit,
             TextEncodeQwenImageEditPlus,
             TextEncodeQwenImageEditFusion,
-            TextEncodeKrea2SpatialEdit,
             EmptyQwenImageLayeredLatentImage,
         ]
 
