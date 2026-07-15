@@ -29,12 +29,21 @@ class CLIPTextEncodeImagePlaceholders(io.ComfyNode):
                 io.Clip.Input("clip"),
                 io.String.Input("text", multiline=True, dynamic_prompts=True),
                 io.Autogrow.Input("images", template=images),
+                io.Int.Input(
+                    "max_total_pixels",
+                    default=1024 * 1024,
+                    min=64 * 64,
+                    max=4096 * 4096,
+                    step=64 * 64,
+                    advanced=True,
+                    tooltip="Maximum combined pixels across placeholder occurrences. Repeated placeholders and image batches count more than once.",
+                ),
             ],
             outputs=[io.Conditioning.Output()],
         )
 
     @classmethod
-    def execute(cls, clip, text, images: io.Autogrow.Type) -> io.NodeOutput:
+    def execute(cls, clip, text, images: io.Autogrow.Type, max_total_pixels=1024 * 1024) -> io.NodeOutput:
         placeholders = [match.group(0).lower() for match in _IMAGE_INPUT_PATTERN.finditer(text)]
         if len(placeholders) == 0:
             raise ValueError("Image placeholder encoding requires at least one image_input_N placeholder.")
@@ -48,6 +57,10 @@ class CLIPTextEncodeImagePlaceholders(io.ComfyNode):
         for placeholder in placeholders:
             if placeholder not in inline_images:
                 raise ValueError(f"No image is connected for {placeholder}.")
+
+        total_pixels = sum(inline_images[placeholder].shape[0] * inline_images[placeholder].shape[1] * inline_images[placeholder].shape[2] for placeholder in placeholders)
+        if total_pixels > max_total_pixels:
+            raise ValueError(f"Inline images contain {total_pixels} total pixels, exceeding the {max_total_pixels} pixel limit. Resize the inputs or increase max_total_pixels.")
 
         expected_images = sum(inline_images[placeholder].shape[0] for placeholder in placeholders)
         tokens = clip.tokenize(text, inline_images=inline_images)

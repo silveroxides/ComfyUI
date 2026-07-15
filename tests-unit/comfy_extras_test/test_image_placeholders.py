@@ -119,6 +119,21 @@ def test_placeholder_node_rejects_missing_placeholders_and_unsupported_tokenizer
         CLIPTextEncodeImagePlaceholders.execute(FakeClip(supports_inline=False), "image_input_1", {"image_1": image})
 
 
+def test_placeholder_node_limits_total_pixels_across_repeated_images():
+    image = torch.zeros(1, 600, 600, 3)
+
+    with pytest.raises(ValueError, match="1080000 total pixels"):
+        CLIPTextEncodeImagePlaceholders.execute(FakeClip(), "image_input_1 image_input_1 image_input_1", {"image_1": image})
+
+    result = CLIPTextEncodeImagePlaceholders.execute(
+        FakeClip(),
+        "image_input_1 image_input_1 image_input_1",
+        {"image_1": image},
+        max_total_pixels=1080000,
+    )
+    assert result.args[0][0][1]["images"] == [0.0, 0.0, 0.0]
+
+
 def test_placeholder_node_schema():
     schema = CLIPTextEncodeImagePlaceholders.define_schema()
     inputs = {value.id: value for value in schema.inputs}
@@ -127,3 +142,4 @@ def test_placeholder_node_schema():
     assert schema.category == "model/conditioning"
     assert "text" in inputs
     assert "images" in inputs
+    assert inputs["max_total_pixels"].default == 1024 * 1024
