@@ -8,7 +8,7 @@ if not torch.cuda.is_available():
     cli_args.cpu = True
 
 try:
-    from comfy_extras.nodes_qwen import TextEncodeQwenImageEditFusion, _flatten_images, _fuse_conditionings, _spatial_fusion_mask, _visual_token_span
+    from comfy_extras.nodes_cond import CLIPTextEncodeImageFusion, _flatten_images, _fuse_conditionings, _resize_visual_tokens, _spatial_fusion_mask, _visual_grid, _visual_token_span
 finally:
     cli_args.cpu = prior_cpu
 
@@ -72,7 +72,7 @@ def test_fusion_replaces_only_visual_tokens_and_preserves_dtype_and_metadata():
         [[second, {"pooled_output": torch.tensor([2.0])}]],
     ]
 
-    fused = _fuse_conditionings(conditionings, tokens, 2, 2, "spatial-checkerboard", 2, 0.5)
+    fused = _fuse_conditionings(conditionings, tokens, [(2, 2), (2, 2)], "spatial-checkerboard", 2, 0.5)
     output, output_metadata = fused[0]
 
     assert output.dtype == torch.float16
@@ -88,8 +88,8 @@ def test_dither_seed_changes_fused_conditioning():
         [[torch.ones((1, 6, 1)), {}]],
     ]
 
-    first = _fuse_conditionings(conditionings, tokens, 2, 2, "spatial-dither-random", 2, 0.5, 7)[0][0]
-    second = _fuse_conditionings(conditionings, tokens, 2, 2, "spatial-dither-random", 2, 0.5, 8)[0][0]
+    first = _fuse_conditionings(conditionings, tokens, [(2, 2), (2, 2)], "spatial-dither-random", 2, 0.5, 7)[0][0]
+    second = _fuse_conditionings(conditionings, tokens, [(2, 2), (2, 2)], "spatial-dither-random", 2, 0.5, 8)[0][0]
 
     assert not torch.equal(first, second)
 
@@ -103,13 +103,47 @@ def test_flatten_images_uses_numeric_input_order_and_splits_batches():
 
     sources = _flatten_images(images)
     assert [source[0, 0, 0, 0].item() for source in sources] == [1.0, 2.0, 3.0, 10.0]
+    images["image_2"][0, 0, 0, 0] = 99.0
+    assert sources[1][0, 0, 0, 0].item() == 2.0
 
 
-def test_node_uses_custom_krea_prompt_and_returns_fused_conditioning():
+def test_visual_tokens_interpolate_in_two_dimensions_and_restore_dtype():
+    visual = torch.tensor([[[0.0], [2.0]]], dtype=torch.float16)
+
+    resized = _resize_visual_tokens(visual, (2, 1), (2, 2))
+
+    assert resized.dtype == torch.float16
+    assert resized.flatten().tolist() == [0.0, 0.0, 2.0, 2.0]
+
+
+def test_fusion_interpolates_to_first_image_grid():
+    first = torch.zeros((1, 6, 1), dtype=torch.float16)
+    second = torch.tensor([[[0.0], [0.0], [2.0], [0.0]]], dtype=torch.float16)
+    conditionings = [[[first, {}]], [[second, {}]]]
+
+    fused = _fuse_conditionings(conditionings, [_tokens(), _tokens()], [(2, 2), (2, 1)], "spatial-dither-random", 2, 0.0)[0][0]
+
+    assert fused.shape == first.shape
+    assert fused.flatten().tolist() == [0.0, 0.0, 0.0, 2.0, 2.0, 0.0]
+
+
+def test_fusion_rejects_different_text_layouts():
+    conditionings = [
+        [[torch.zeros((1, 6, 1)), {}]],
+        [[torch.zeros((1, 7, 1)), {}]],
+    ]
+
+    with pytest.raises(ValueError, match="different text token layouts"):
+        _fuse_conditionings(conditionings, [_tokens(), _tokens(suffix=2)], [(2, 2), (2, 2)], "spatial-checkerboard", 2, 0.5)
+
+
+def test_node_preserves_images_uses_tokenizer_template_and_returns_fused_conditioning():
+    seen_shapes = []
+
     class FakeClip:
         def tokenize(self, text, images):
-            assert text.startswith("<|im_start|>system\nDescribe the image by detailing")
-            assert "Picture 1:" not in text
+            assert text == "test prompt"
+            seen_shapes.append(images[0].shape)
             pairs = [
                 (1, 1.0),
                 ({"type": "image", "data": images[0]}, 1.0),
@@ -120,27 +154,30 @@ def test_node_uses_custom_krea_prompt_and_returns_fused_conditioning():
         def encode_from_tokens_scheduled(self, tokens):
             image = next(pair[0]["data"] for pair in tokens["qwen3vl_4b"][0] if isinstance(pair[0], dict))
             value = image.mean()
-            return [[torch.full((1, 146, 1), value, dtype=torch.float16), {"source": float(value)}]]
+            height, width = _visual_grid(image)
+            return [[torch.full((1, height * width + 2, 1), value, dtype=torch.float16), {"source": float(value)}]]
 
-    result = TextEncodeQwenImageEditFusion.execute(
+    images = {"image_1": torch.zeros(1, 32, 64, 4), "image_2": torch.ones(1, 64, 32, 4)}
+    result = CLIPTextEncodeImageFusion.execute(
         FakeClip(),
         "test prompt",
-        {"image_1": torch.zeros(1, 32, 32, 3), "image_2": torch.ones(1, 32, 32, 3)},
+        images,
         "spatial-dither-random",
         seed=7,
     )
-    changed_seed = TextEncodeQwenImageEditFusion.execute(
+    changed_seed = CLIPTextEncodeImageFusion.execute(
         FakeClip(),
         "test prompt",
-        {"image_1": torch.zeros(1, 32, 32, 3), "image_2": torch.ones(1, 32, 32, 3)},
+        images,
         "spatial-dither-random",
         seed=8,
     )
     conditioning = result.args[0]
     output, metadata = conditioning[0]
 
+    assert seen_shapes == [torch.Size([1, 32, 64, 3]), torch.Size([1, 64, 32, 3])] * 2
     assert output.dtype == torch.float16
-    assert output.shape == (1, 146, 1)
+    assert output.shape == (1, 8, 1)
     assert output[:, 0].item() == 0.0
     assert output[:, -1].item() == 0.0
     assert set(output[:, 1:-1].flatten().tolist()) == {0.0, 1.0}
@@ -148,7 +185,12 @@ def test_node_uses_custom_krea_prompt_and_returns_fused_conditioning():
     assert not torch.equal(output, changed_seed.args[0][0][0])
 
 
-def test_node_exposes_seed_control():
-    inputs = {value.id: value for value in TextEncodeQwenImageEditFusion.define_schema().inputs}
+def test_node_exposes_generic_interface_without_vae():
+    schema = CLIPTextEncodeImageFusion.define_schema()
+    inputs = {value.id: value for value in schema.inputs}
+    assert schema.node_id == "CLIPTextEncodeImageFusion"
+    assert schema.category == "model/conditioning"
+    assert "text" in inputs
+    assert "vae" not in inputs
     assert inputs["seed"].default == 0
     assert inputs["seed"].control_after_generate is True
