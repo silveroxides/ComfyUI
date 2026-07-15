@@ -88,10 +88,14 @@ def test_krea_visual_token_node_is_registered():
 
 
 def test_krea_experiment_configuration_selects_index_and_returns_record():
-    output = Krea2ExperimentConfiguration.execute(KREA2_EXPERIMENT_CONFIG, 0).args
-    assert output[0].startswith("Apply the requested edit")
-    assert output[2:5] == (1024, 1.0, "uniform-grid")
-    assert output[-1]["case_name"] == "1024-full"
+    configurations = """[
+        {"prompt": "first", "negative_prompt": "", "visual_resolution": 384, "visual_token_ratio": 0.0, "selection_method": "uniform-grid", "seed": 1, "steps": 20, "cfg": 1.0, "sampler_name": "euler", "scheduler": "normal", "denoise": 1.0, "width": 1024, "height": 1024},
+        {"prompt": "second", "negative_prompt": "", "visual_resolution": 384, "visual_token_ratio": 0.0, "selection_method": "legacy-tail", "seed": 1, "steps": 20, "cfg": 1.0, "sampler_name": "euler", "scheduler": "normal", "denoise": 1.0, "width": 1024, "height": 1024}
+    ]"""
+    output = Krea2ExperimentConfiguration.execute(configurations, 1).args
+    assert output[0] == "second"
+    assert output[2:5] == (384, 0.0, "legacy-tail")
+    assert output[-1] == 2
 
 
 def test_select_visual_tokens_preserves_order_and_slices_attention_mask():

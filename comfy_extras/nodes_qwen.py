@@ -16,24 +16,7 @@ import nodes
 Krea2Experiment = io.Custom("KREA2_EXPERIMENT")
 
 
-KREA2_EXPERIMENT_CONFIG = """[
-  {
-    "case_name": "1024-full",
-    "prompt": "Apply the requested edit while preserving everything else.",
-    "negative_prompt": "",
-    "visual_resolution": 1024,
-    "visual_token_ratio": 1.0,
-    "selection_method": "uniform-grid",
-    "seed": 1,
-    "steps": 20,
-    "cfg": 1.0,
-    "sampler_name": "euler",
-    "scheduler": "normal",
-    "denoise": 1.0,
-    "width": 1024,
-    "height": 1024
-  }
-]"""
+KREA2_EXPERIMENT_CONFIG = "[]"
 
 
 def _spatial_fusion_mask(height, width, num_sources, method, block_size, dither_ratio, device, seed=0):
@@ -277,10 +260,11 @@ class Krea2ExperimentConfiguration(io.ComfyNode):
         outputs = [
             io.AnyType.Output(display_name=name) for name in (
                 "prompt", "negative_prompt", "visual_resolution", "visual_token_ratio", "selection_method",
-                "seed", "steps", "cfg", "sampler_name", "scheduler", "denoise", "width", "height", "case_name",
+                "seed", "steps", "cfg", "sampler_name", "scheduler", "denoise", "width", "height",
             )
         ]
         outputs.append(Krea2Experiment.Output(display_name="configuration"))
+        outputs.append(io.Int.Output(display_name="configuration_count"))
         return io.Schema(
             node_id="Krea2ExperimentConfiguration",
             display_name="Krea 2 Experiment Configuration",
@@ -297,19 +281,19 @@ class Krea2ExperimentConfiguration(io.ComfyNode):
         values = json.loads(configurations)
         if not isinstance(values, list) or not values:
             raise ValueError("Krea 2 experiment configurations must be a non-empty JSON list.")
+        required = (
+            "prompt", "negative_prompt", "visual_resolution", "visual_token_ratio", "selection_method",
+            "seed", "steps", "cfg", "sampler_name", "scheduler", "denoise", "width", "height",
+        )
         if index >= len(values):
             raise ValueError(f"Krea 2 experiment configuration index {index} is out of range for {len(values)} configurations.")
         configuration = values[index]
         if not isinstance(configuration, dict):
             raise ValueError("Each Krea 2 experiment configuration must be a JSON object.")
-        required = (
-            "prompt", "negative_prompt", "visual_resolution", "visual_token_ratio", "selection_method",
-            "seed", "steps", "cfg", "sampler_name", "scheduler", "denoise", "width", "height", "case_name",
-        )
         missing = [name for name in required if name not in configuration]
         if missing:
             raise ValueError(f"Krea 2 experiment configuration is missing: {', '.join(missing)}")
-        return io.NodeOutput(*(configuration[name] for name in required), configuration.copy())
+        return io.NodeOutput(*(configuration[name] for name in required), configuration, len(values))
 
 
 def _image_similarity(source, generated):
