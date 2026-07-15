@@ -1,7 +1,9 @@
+import math
 import re
 
 from typing_extensions import override
 
+import comfy.utils
 from comfy_api.latest import ComfyExtension, io
 
 
@@ -10,6 +12,20 @@ _IMAGE_INPUT_PATTERN = re.compile(r"\bimage_input_(\d+)\b", re.IGNORECASE)
 
 def _image_token_count(tokens):
     return sum(isinstance(pair[0], dict) and pair[0].get("type") == "image" for rows in tokens.values() for row in rows for pair in row)
+
+
+def _limit_image_megapixels(image, max_megapixels):
+    image = image[:, :, :, :3]
+    height, width = image.shape[1:3]
+    max_pixels = max_megapixels * 1024 * 1024
+    if height * width <= max_pixels:
+        return image
+
+    scale = math.sqrt(max_pixels / (height * width))
+    width = max(1, round(width * scale))
+    height = max(1, round(height * scale))
+    image = comfy.utils.common_upscale(image.movedim(-1, 1), width, height, "area", "disabled")
+    return image.movedim(1, -1)
 
 
 class CLIPTextEncodeImagePlaceholders(io.ComfyNode):
@@ -29,21 +45,21 @@ class CLIPTextEncodeImagePlaceholders(io.ComfyNode):
                 io.Clip.Input("clip"),
                 io.String.Input("text", multiline=True, dynamic_prompts=True),
                 io.Autogrow.Input("images", template=images),
-                io.Int.Input(
-                    "max_total_pixels",
-                    default=1024 * 1024,
-                    min=64 * 64,
-                    max=4096 * 4096,
-                    step=64 * 64,
+                io.Float.Input(
+                    "max_megapixels",
+                    default=0.25,
+                    min=0.01,
+                    max=16.0,
+                    step=0.01,
                     advanced=True,
-                    tooltip="Maximum combined pixels across placeholder occurrences. Repeated placeholders and image batches count more than once.",
+                    tooltip="Maximum resolution of each image in megapixels. Larger images are downscaled while preserving aspect ratio.",
                 ),
             ],
             outputs=[io.Conditioning.Output()],
         )
 
     @classmethod
-    def execute(cls, clip, text, images: io.Autogrow.Type, max_total_pixels=1024 * 1024) -> io.NodeOutput:
+    def execute(cls, clip, text, images: io.Autogrow.Type, max_megapixels=0.25) -> io.NodeOutput:
         placeholders = [match.group(0).lower() for match in _IMAGE_INPUT_PATTERN.finditer(text)]
         if len(placeholders) == 0:
             raise ValueError("Image placeholder encoding requires at least one image_input_N placeholder.")
@@ -52,15 +68,11 @@ class CLIPTextEncodeImagePlaceholders(io.ComfyNode):
         for name, image in (images or {}).items():
             if image is not None:
                 number = int(name.rsplit("_", 1)[-1])
-                inline_images[f"image_input_{number}"] = image[:, :, :, :3]
+                inline_images[f"image_input_{number}"] = _limit_image_megapixels(image, max_megapixels)
 
         for placeholder in placeholders:
             if placeholder not in inline_images:
                 raise ValueError(f"No image is connected for {placeholder}.")
-
-        total_pixels = sum(inline_images[placeholder].shape[0] * inline_images[placeholder].shape[1] * inline_images[placeholder].shape[2] for placeholder in placeholders)
-        if total_pixels > max_total_pixels:
-            raise ValueError(f"Inline images contain {total_pixels} total pixels, exceeding the {max_total_pixels} pixel limit. Resize the inputs or increase max_total_pixels.")
 
         expected_images = sum(inline_images[placeholder].shape[0] for placeholder in placeholders)
         tokens = clip.tokenize(text, inline_images=inline_images)
