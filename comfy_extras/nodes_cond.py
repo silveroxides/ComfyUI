@@ -54,13 +54,12 @@ def _resize_visual_tokens(visual, source_grid, target_grid):
     if source_grid == target_grid:
         return visual
 
-    dtype = visual.dtype
     batch, _, dimensions = visual.shape
     height, width = source_grid
     target_height, target_width = target_grid
-    visual = visual.reshape(batch, height, width, dimensions).permute(0, 3, 1, 2).float()
+    visual = visual.reshape(batch, height, width, dimensions).permute(0, 3, 1, 2)
     visual = F.interpolate(visual, size=(target_height, target_width), mode="bilinear", align_corners=False)
-    return visual.permute(0, 2, 3, 1).reshape(batch, target_height * target_width, dimensions).to(dtype=dtype)
+    return visual.permute(0, 2, 3, 1).reshape(batch, target_height * target_width, dimensions)
 
 
 def _fuse_conditionings(conditionings, tokens, visual_grids, method, block_size, dither_ratio, seed=0):
