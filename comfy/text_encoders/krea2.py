@@ -20,6 +20,20 @@ KREA2_TAP_LAYERS = [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35]
 KREA2_TEMPLATE = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
 
 
+def _krea2_template_end(tok_pairs):
+    image_position = next((i for i, pair in enumerate(tok_pairs) if isinstance(pair[0], dict) and pair[0].get("type") == "image"), len(tok_pairs))
+    template_end = -1
+    for i in range(image_position):
+        if i + 2 >= len(tok_pairs):
+            break
+        values = [tok_pairs[j][0] for j in range(i, i + 3)]
+        if all(not torch.is_tensor(value) and isinstance(value, numbers.Integral) for value in values) and values == [151644, 872, 198]:
+            template_end = i + 3
+    if template_end == -1:
+        raise ValueError("Could not locate the Krea 2 user prompt template.")
+    return template_end
+
+
 class Krea2Tokenizer(comfy.text_encoders.qwen3vl.Qwen3VLTokenizer):
     def __init__(self, embedding_directory=None, tokenizer_data={}):
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, model_type="qwen3vl_4b")
@@ -44,19 +58,8 @@ class Krea2TEModel(sd1_clip.SD1ClipModel):
         out, pooled, extra = super().encode_token_weights(token_weight_pairs)  # out: (B, 12, seq, 2560)
         tok_pairs = token_weight_pairs["qwen3vl_4b"][0]
 
-        # Strip the system + user-opening prefix
-        count_im_start = 0
         if template_end == -1:
-            for i, v in enumerate(tok_pairs):
-                elem = v[0]
-                if not torch.is_tensor(elem) and isinstance(elem, numbers.Integral):
-                    if elem == 151644 and count_im_start < 2:
-                        template_end = i
-                        count_im_start += 1
-            if out.shape[2] > (template_end + 3):
-                if tok_pairs[template_end + 1][0] == 872:      # "user"
-                    if tok_pairs[template_end + 2][0] == 198:   # "\n"
-                        template_end += 3
+            template_end = _krea2_template_end(tok_pairs)
 
         out = out[:, :, template_end:]
 

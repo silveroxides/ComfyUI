@@ -8,6 +8,7 @@ if not torch.cuda.is_available():
     cli_args.cpu = True
 
 try:
+    from comfy.text_encoders.krea2 import KREA2_TEMPLATE, Krea2Tokenizer, _krea2_template_end
     from comfy_extras.nodes_cond import CLIPTextEncodeImageFusion, _flatten_images, _fuse_conditionings, _resize_visual_tokens, _spatial_fusion_mask, _visual_grid, _visual_token_span
 finally:
     cli_args.cpu = prior_cpu
@@ -60,6 +61,22 @@ def test_dither_mask_is_seeded_on_cuda():
 def test_visual_span_accounts_for_stripped_prefix():
     tokens = _tokens(image_position=3, suffix=4)
     assert _visual_token_span(tokens, cond_length=9, visual_tokens=4) == (1, 5)
+
+
+def test_krea_template_stripping_preserves_visual_tokens():
+    tokenizer = Krea2Tokenizer()
+    image = torch.zeros(1, 64, 64, 3)
+    image_prompt = "<|vision_start|><|image_pad|><|vision_end|>test prompt"
+
+    for text in ("test prompt", KREA2_TEMPLATE.format(image_prompt)):
+        tokens = tokenizer.tokenize_with_weights(text, images=[image])
+        token_pairs = tokens["qwen3vl_4b"][0]
+        image_position = next(i for i, pair in enumerate(token_pairs) if isinstance(pair[0], dict))
+        template_end = _krea2_template_end(token_pairs)
+        cond_length = len(token_pairs) - 1 + 4 - template_end
+
+        assert template_end <= image_position
+        assert _visual_token_span(tokens, cond_length, 4) == (image_position - template_end, image_position - template_end + 4)
 
 
 def test_fusion_replaces_only_visual_tokens_and_preserves_dtype_and_metadata():
