@@ -1,4 +1,5 @@
 import os
+import re
 
 import torch
 import torch.nn as nn
@@ -19,6 +20,9 @@ QWEN3VL_VISION_COMMON = dict(num_heads=16, patch_size=16, temporal_patch_size=2,
                              spatial_merge_size=2, num_position_embeddings=2304)
 
 QWEN3VL_CONFIGS = {"qwen3vl_4b": Qwen3VL_4BConfig, "qwen3vl_8b": Qwen3VL_8BConfig}
+
+_IMAGE_INPUT_PATTERN = re.compile(r"\bimage_input_(\d+)\b", re.IGNORECASE)
+_VISION_BLOCK = "<|vision_start|><|image_pad|><|vision_end|>"
 
 
 class Qwen3VLDeepstackMerger(nn.Module):
@@ -156,10 +160,38 @@ class Qwen3VLTokenizer(sd1_clip.SD1Tokenizer):
         tokenizer = lambda *a, **kw: Qwen3VLSDTokenizer(*a, **kw, embedding_size=embedding_size, embedding_key=model_type)
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name=model_type, tokenizer=tokenizer)
         self.llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
-        self.llama_template_images = "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
+        self.llama_template_images = f"<|im_start|>user\n{_VISION_BLOCK}{{}}<|im_end|>\n<|im_start|>assistant\n"
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, thinking=False, **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], inline_images=None, prevent_empty_text=False, thinking=False, **kwargs):
         image = kwargs.get("image", None)
+        if inline_images is not None and (image is not None or len(images) > 0):
+            raise ValueError("inline_images cannot be combined with image or images.")
+
+        has_inline_images = inline_images is not None
+        if has_inline_images:
+            normalized_images = {}
+            for name, inline_image in inline_images.items():
+                name = name.lower()
+                if name in normalized_images:
+                    raise ValueError(f"Duplicate inline image placeholder: {name}")
+                normalized_images[name] = inline_image
+
+            images = []
+
+            def replace_image(match):
+                name = match.group(0).lower()
+                if name not in normalized_images:
+                    raise ValueError(f"No image was provided for {name}.")
+                inline_image = normalized_images[name]
+                if inline_image.shape[0] == 0:
+                    raise ValueError(f"No image was provided for {name}.")
+                images.extend(inline_image[i:i + 1] for i in range(inline_image.shape[0]))
+                return _VISION_BLOCK * inline_image.shape[0]
+
+            text, replacements = _IMAGE_INPUT_PATTERN.subn(replace_image, text)
+            if replacements == 0:
+                raise ValueError("No inline image placeholders were found in the text.")
+
         if image is not None and len(images) == 0:
             images = [image[i:i + 1] for i in range(image.shape[0])]
 
@@ -172,13 +204,12 @@ class Qwen3VLTokenizer(sd1_clip.SD1Tokenizer):
         else:
             if llama_template is not None:
                 template = llama_template
-            elif len(images) == 0:
+            elif has_inline_images or len(images) == 0:
                 template = self.llama_template
             else:
                 template = self.llama_template_images
                 if len(images) > 1:
-                    vision_block = "<|vision_start|><|image_pad|><|vision_end|>"
-                    template = template.replace(vision_block, vision_block * len(images), 1)
+                    template = template.replace(_VISION_BLOCK, _VISION_BLOCK * len(images), 1)
             llama_text = template.format(text)
             if not thinking:  # Qwen3 convention: empty think block suppresses reasoning
                 llama_text += "<think>\n\n</think>\n\n"

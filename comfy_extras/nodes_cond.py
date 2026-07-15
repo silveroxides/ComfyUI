@@ -1,6 +1,60 @@
+import re
+
 from typing_extensions import override
 
 from comfy_api.latest import ComfyExtension, io
+
+
+_IMAGE_INPUT_PATTERN = re.compile(r"\bimage_input_(\d+)\b", re.IGNORECASE)
+
+
+def _image_token_count(tokens):
+    return sum(isinstance(pair[0], dict) and pair[0].get("type") == "image" for rows in tokens.values() for row in rows for pair in row)
+
+
+class CLIPTextEncodeImagePlaceholders(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        images = io.Autogrow.TemplateNames(
+            io.Image.Input("image"),
+            names=[f"image_{i}" for i in range(1, 17)],
+            min=1,
+        )
+        return io.Schema(
+            node_id="CLIPTextEncodeImagePlaceholders",
+            display_name="CLIP Text Encode (Image Placeholders)",
+            category="model/conditioning",
+            description="Encodes images at image_input_N locations in the text. Image resolution affects conditioning quality and memory use.",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input("text", multiline=True, dynamic_prompts=True),
+                io.Autogrow.Input("images", template=images),
+            ],
+            outputs=[io.Conditioning.Output()],
+        )
+
+    @classmethod
+    def execute(cls, clip, text, images: io.Autogrow.Type) -> io.NodeOutput:
+        placeholders = [match.group(0).lower() for match in _IMAGE_INPUT_PATTERN.finditer(text)]
+        if len(placeholders) == 0:
+            raise ValueError("Image placeholder encoding requires at least one image_input_N placeholder.")
+
+        inline_images = {}
+        for name, image in (images or {}).items():
+            if image is not None:
+                number = int(name.rsplit("_", 1)[-1])
+                inline_images[f"image_input_{number}"] = image[:, :, :, :3]
+
+        for placeholder in placeholders:
+            if placeholder not in inline_images:
+                raise ValueError(f"No image is connected for {placeholder}.")
+
+        expected_images = sum(inline_images[placeholder].shape[0] for placeholder in placeholders)
+        tokens = clip.tokenize(text, inline_images=inline_images)
+        if _image_token_count(tokens) != expected_images:
+            raise ValueError("The selected CLIP tokenizer does not support inline images.")
+
+        return io.NodeOutput(clip.encode_from_tokens_scheduled(tokens))
 
 
 class CLIPTextEncodeControlnet(io.ComfyNode):
@@ -61,6 +115,7 @@ class CondExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
+            CLIPTextEncodeImagePlaceholders,
             CLIPTextEncodeControlnet,
             T5TokenizerOptions,
         ]
