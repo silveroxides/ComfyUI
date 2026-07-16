@@ -331,14 +331,17 @@ def _face_transfer_mask(height: int, width: int, face: dict, connection_sets: di
             relative_x = (xx - eye_center[0]) * horizontal[0] + (yy - eye_center[1]) * horizontal[1]
             protected = np.zeros_like(oval)
             for eye_name, eyebrow_name in (("left_eye", "left_eyebrow"), ("right_eye", "right_eyebrow")):
-                feature = landmarks[_edge_vertices(connection_sets[eye_name] | connection_sets[eyebrow_name])]
+                eye = landmarks[_edge_vertices(connection_sets[eye_name])]
+                eyebrow = landmarks[_edge_vertices(connection_sets[eyebrow_name])]
+                feature = np.concatenate([eye, eyebrow])
                 feature_x = (feature - eye_center) @ horizontal
-                feature_y = (feature - eye_center) @ vertical
+                eye_y = (eye - eye_center) @ vertical
+                eyebrow_y = (eyebrow - eye_center) @ vertical
                 protected |= (
                     (relative_x >= feature_x.min() - scale * 0.08)
                     & (relative_x <= feature_x.max() + scale * 0.08)
-                    & (relative_y >= feature_y.min() - scale * 0.04)
-                    & (relative_y <= feature_y.max() + scale * 0.04)
+                    & (relative_y >= eyebrow_y.max())
+                    & (relative_y <= eye_y.max() + scale * 0.04)
                 )
             candidates = oval & ~protected & (color_edge > 0.25) & (occlusion_zone > 0.05)
             labels, count = scipy.ndimage.label(candidates, structure=np.ones((3, 3), dtype=np.uint8))
