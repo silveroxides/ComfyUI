@@ -65,15 +65,30 @@ def test_transfer_anchors_use_feature_centers_only():
     np.testing.assert_allclose(anchors[4], face["landmarks_xy"][lip_vertices].mean(axis=0))
 
 
-def test_target_warp_weight_decays_outside_face_edge():
-    mask = np.zeros((11, 11), dtype=np.float32)
-    mask[4:7, 4:7] = 1.0
+def test_transfer_mask_has_soft_target_boundary():
+    canonical, connection_sets = _face_data()
+    face = _face(canonical, (20, 20), 12)
 
-    weight = mediapipe_nodes._edge_warp_weight(mask, radius=3)
+    mask, _, _ = mediapipe_nodes._face_transfer_mask(48, 48, face, connection_sets)
 
-    assert weight[5, 5] == 1.0
-    assert 0.0 < weight[5, 2] < weight[5, 3] < weight[5, 4]
-    assert weight[5, 1] == 0.0
+    assert mask.max() == 1.0
+    assert np.any((mask > 0.0) & (mask < 1.0))
+
+
+def test_transfer_mask_excludes_forehead_color_edges():
+    canonical, connection_sets = _face_data()
+    face = _face(canonical, (20, 20), 12)
+    image = torch.full((1, 48, 48, 3), 0.6)
+    image[:, 8:16] = 0.0
+
+    geometric, _, _ = mediapipe_nodes._face_transfer_mask(
+        48, 48, face, connection_sets, forehead_coverage=1.0,
+    )
+    edge_aware, _, _ = mediapipe_nodes._face_transfer_mask(
+        48, 48, face, connection_sets, forehead_coverage=1.0, image=image,
+    )
+
+    assert edge_aware.sum() < geometric.sum()
 
 
 def test_largest_face_uses_landmark_area():

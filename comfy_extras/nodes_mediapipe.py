@@ -264,16 +264,19 @@ def _polygon_mask(height: int, width: int, points: np.ndarray, offset_x: int = 0
     return np.asarray(image, dtype=np.float32) / 255.0
 
 
-def _face_transfer_mask(height: int, width: int, face: dict, connection_sets: dict[str, frozenset]) -> tuple[np.ndarray, int, int]:
+def _face_transfer_mask(height: int, width: int, face: dict, connection_sets: dict[str, frozenset],
+                        edge_feather: float = 8.0, forehead_coverage: float = 0.5,
+                        image: torch.Tensor | None = None) -> tuple[np.ndarray, int, int]:
     landmarks = face["landmarks_xy"]
     _, scale = _face_scale(face)
-    inset = max(1, round(scale * 0.035))
+    blend_width = max(1.0, scale * edge_feather / 100.0)
     x1, y1, x2, y2 = (float(v) for v in face["bbox_xyxy"])
-    left = max(0, int(np.floor(x1)) - inset - 2)
-    top_offset = max(0, int(np.floor(y1)) - inset - 2)
-    right = min(width, int(np.ceil(x2)) + inset + 2)
-    bottom = min(height, int(np.ceil(y2)) + inset + 2)
-    mask = _polygon_mask(bottom - top_offset, right - left, _face_oval(face, connection_sets), left, top_offset) > 0.5
+    left = max(0, int(np.floor(x1)) - 2)
+    top_offset = max(0, int(np.floor(y1)) - 2)
+    right = min(width, int(np.ceil(x2)) + 2)
+    bottom = min(height, int(np.ceil(y2)) + 2)
+    face_oval = _face_oval(face, connection_sets)
+    oval = _polygon_mask(bottom - top_offset, right - left, face_oval, left, top_offset) > 0.5
 
     eyes = np.concatenate([
         landmarks[_edge_vertices(connection_sets["left_eye"])],
@@ -286,13 +289,39 @@ def _face_transfer_mask(height: int, width: int, face: dict, connection_sets: di
     if vertical_length < 1.0:
         raise ValueError("Face transfer requires non-degenerate face landmarks.")
     vertical /= vertical_length
-    top = float(np.min((eyes - eye_center) @ vertical)) - vertical_length * 0.08
+    eye_top = float(np.min((eyes - eye_center) @ vertical))
+    oval_top = float(np.min((face_oval - eye_center) @ vertical))
+    fade_center = eye_top + (oval_top - eye_top) * forehead_coverage
+    fade_start = fade_center - vertical_length * 0.15
+    fade_end = fade_center + vertical_length * 0.10
 
     yy, xx = np.mgrid[top_offset:bottom, left:right]
     relative_y = (xx - eye_center[0]) * vertical[0] + (yy - eye_center[1]) * vertical[1]
-    mask &= relative_y >= top
+    top_weight = np.clip((relative_y - fade_start) / max(fade_end - fade_start, 1.0), 0.0, 1.0)
+    top_weight = top_weight * top_weight * (3.0 - 2.0 * top_weight)
 
-    return (scipy.ndimage.distance_transform_edt(mask) > inset).astype(np.float32), left, top_offset
+    edge_weight = np.clip(scipy.ndimage.distance_transform_edt(oval) / blend_width, 0.0, 1.0)
+    edge_weight = edge_weight * edge_weight * (3.0 - 2.0 * edge_weight)
+    mask = edge_weight * top_weight
+
+    if image is not None:
+        nose_center = landmarks[_edge_vertices(connection_sets["nose"])].mean(axis=0)
+        reference_radius = max(3.0, scale * 0.07)
+        reference = (xx - nose_center[0]) ** 2 + (yy - nose_center[1]) ** 2 <= reference_radius ** 2
+        image_crop = image[0, top_offset:bottom, left:right, :3].detach().float().cpu().numpy()
+        if int(reference.sum()) >= 16:
+            skin_color = np.median(image_crop[reference], axis=0)
+            color_distance = np.sqrt(((image_crop - skin_color) ** 2).mean(axis=2))
+            reference_distance = color_distance[reference]
+            low = max(0.08, float(np.percentile(reference_distance, 90)) * 1.5)
+            high = max(low + 0.08, 0.22)
+            color_edge = np.clip((color_distance - low) / (high - low), 0.0, 1.0)
+            color_edge = color_edge * color_edge * (3.0 - 2.0 * color_edge)
+            forehead = np.clip(1.0 - (relative_y - eye_top) / max(vertical_length * 0.25, 1.0), 0.0, 1.0)
+            forehead = forehead * forehead * (3.0 - 2.0 * forehead)
+            mask *= 1.0 - forehead * color_edge
+
+    return mask.astype(np.float32), left, top_offset
 
 
 def _sampling_grid(points: np.ndarray, height: int, width: int, left: int = 0, top: int = 0) -> np.ndarray:
@@ -300,23 +329,6 @@ def _sampling_grid(points: np.ndarray, height: int, width: int, left: int = 0, t
         (2.0 * (points[:, 0] - left) + 1.0) / width - 1.0,
         (2.0 * (points[:, 1] - top) + 1.0) / height - 1.0,
     ])
-
-
-def _blur_mask(mask: torch.Tensor, radius: int) -> torch.Tensor:
-    if radius <= 0:
-        return mask
-    sigma = max(radius * 0.5, 0.5)
-    coordinates = torch.arange(-radius, radius + 1, device=mask.device, dtype=mask.dtype)
-    kernel = torch.exp(-(coordinates ** 2) / (2.0 * sigma ** 2))
-    kernel /= kernel.sum()
-    mask = F.conv2d(mask[None, None], kernel[None, None, None, :], padding=(0, radius))
-    return F.conv2d(mask, kernel[None, None, :, None], padding=(radius, 0))[0, 0]
-
-
-def _edge_warp_weight(mask: np.ndarray, radius: int) -> np.ndarray:
-    outside_distance = scipy.ndimage.distance_transform_edt(mask <= 0.5)
-    weight = np.clip(1.0 - outside_distance / radius, 0.0, 1.0)
-    return weight * weight * (3.0 - 2.0 * weight)
 
 
 def _harmonize_face(source: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -359,19 +371,16 @@ def _detect_largest_faces(face_detection_model, images: torch.Tensor) -> list[di
 
 
 def _transfer_face(source: torch.Tensor, target: torch.Tensor, source_face: dict, target_face: dict,
-                   connection_sets: dict[str, frozenset]) -> torch.Tensor:
+                   connection_sets: dict[str, frozenset], source_scale_factor: float = 1.08,
+                   edge_feather: float = 8.0, forehead_coverage: float = 0.5) -> torch.Tensor:
     source_center, source_scale = _face_scale(source_face)
     target_center, target_scale = _face_scale(target_face)
     source_anchors = (_face_transfer_anchors(source_face, connection_sets) - source_center) / source_scale
     target_anchors = (_face_transfer_anchors(target_face, connection_sets) - target_center) / target_scale
-    middle_anchors = (source_anchors + target_anchors) * 0.5
-    source_weights, source_affine = _solve_thin_plate_spline(middle_anchors, source_anchors, smoothing=0.01)
-    target_weights, target_affine = _solve_thin_plate_spline(middle_anchors, target_anchors, smoothing=0.01)
+    source_weights, source_affine = _solve_thin_plate_spline(target_anchors, source_anchors, smoothing=0.01)
 
     x1, y1, x2, y2 = (float(v) for v in target_face["bbox_xyxy"])
-    feather = max(1, round(target_scale * 0.04))
-    warp_radius = max(2, round(target_scale * 0.12))
-    padding = warp_radius + feather
+    padding = max(2, round(target_scale * 0.04))
     left = max(0, int(np.floor(x1)) - padding)
     top = max(0, int(np.floor(y1)) - padding)
     right = min(target.shape[2], int(np.ceil(x2)) + padding)
@@ -382,44 +391,41 @@ def _transfer_face(source: torch.Tensor, target: torch.Tensor, source_face: dict
     yy, xx = np.mgrid[top:bottom, left:right]
     target_points = np.column_stack([xx.reshape(-1), yy.reshape(-1)]).astype(np.float64)
     target_normalized = (target_points - target_center) / target_scale
-    source_normalized = _evaluate_thin_plate_spline(target_normalized, middle_anchors, source_weights, source_affine)
-    warped_target_normalized = _evaluate_thin_plate_spline(target_normalized, middle_anchors, target_weights, target_affine)
+    source_normalized = _evaluate_thin_plate_spline(target_normalized, target_anchors, source_weights, source_affine)
+    anchor_distance = np.sqrt(((target_normalized[:, None] - target_anchors[None]) ** 2).sum(axis=2)).min(axis=1)
+    overscale_weight = np.clip(anchor_distance / 0.45, 0.0, 1.0)
+    overscale_weight = overscale_weight * overscale_weight * (3.0 - 2.0 * overscale_weight)
+    source_normalized *= (1.0 - (1.0 - 1.0 / source_scale_factor) * overscale_weight)[:, None]
     source_points = source_normalized * source_scale + source_center
-    warped_target_points = warped_target_normalized * target_scale + target_center
 
     source_height, source_width = source.shape[1:3]
     source_grid = _sampling_grid(source_points, source_height, source_width).reshape(bottom - top, right - left, 2)
     target_height, target_width = target.shape[1:3]
-    target_grid = _sampling_grid(warped_target_points, target_height, target_width).reshape(bottom - top, right - left, 2)
     source_grid = torch.from_numpy(source_grid).to(device=source.device, dtype=source.dtype)[None]
-    target_grid = torch.from_numpy(target_grid).to(device=source.device, dtype=source.dtype)[None]
 
     source_rgb = source[:, :, :, :3].movedim(-1, 1)
     warped_source = F.grid_sample(source_rgb, source_grid, mode="bilinear", padding_mode="zeros", align_corners=False)[0].movedim(0, -1)
-    target_rgb = target[:, :, :, :3].to(device=source.device, dtype=source.dtype).movedim(-1, 1)
-    warped_target = F.grid_sample(target_rgb, target_grid, mode="bilinear", padding_mode="border", align_corners=False)[0].movedim(0, -1)
 
-    source_mask_np, source_mask_left, source_mask_top = _face_transfer_mask(source_height, source_width, source_face, connection_sets)
+    source_mask_np, source_mask_left, source_mask_top = _face_transfer_mask(
+        source_height, source_width, source_face, connection_sets, edge_feather, forehead_coverage, source,
+    )
     source_mask = torch.from_numpy(source_mask_np).to(device=source.device, dtype=source.dtype)[None, None]
     source_mask_grid = _sampling_grid(source_points, source_mask_np.shape[0], source_mask_np.shape[1], source_mask_left, source_mask_top)
     source_mask_grid = torch.from_numpy(source_mask_grid.reshape(bottom - top, right - left, 2)).to(device=source.device, dtype=source.dtype)[None]
     warped_source_mask = F.grid_sample(source_mask, source_mask_grid, mode="bilinear", padding_mode="zeros", align_corners=False)[0, 0]
 
-    target_mask_np, target_mask_left, target_mask_top = _face_transfer_mask(target_height, target_width, target_face, connection_sets)
+    target_mask_np, target_mask_left, target_mask_top = _face_transfer_mask(
+        target_height, target_width, target_face, connection_sets, edge_feather, forehead_coverage, target,
+    )
     target_mask = torch.from_numpy(target_mask_np).to(device=source.device, dtype=source.dtype)[None, None]
-    target_mask_grid = _sampling_grid(warped_target_points, target_mask_np.shape[0], target_mask_np.shape[1], target_mask_left, target_mask_top)
+    target_mask_grid = _sampling_grid(target_points, target_mask_np.shape[0], target_mask_np.shape[1], target_mask_left, target_mask_top)
     target_mask_grid = torch.from_numpy(target_mask_grid.reshape(bottom - top, right - left, 2)).to(device=source.device, dtype=source.dtype)[None]
     warped_target_mask = F.grid_sample(target_mask, target_mask_grid, mode="bilinear", padding_mode="zeros", align_corners=False)[0, 0]
-    hard_mask = torch.minimum(warped_source_mask, warped_target_mask).clamp(0.0, 1.0)
-    mask = torch.minimum(_blur_mask(hard_mask, feather), hard_mask)
+    mask = torch.minimum(warped_source_mask, warped_target_mask).clamp(0.0, 1.0)
 
     original_target = target[0, top:bottom, left:right, :3].to(device=source.device, dtype=source.dtype)
-    target_warp_weight = _edge_warp_weight(warped_target_mask.detach().cpu().numpy(), warp_radius)
-    target_warp_weight = torch.from_numpy(target_warp_weight).to(device=source.device, dtype=source.dtype)
-    blended_target = original_target + (warped_target - original_target) * target_warp_weight[..., None]
-
-    warped_source = _harmonize_face(warped_source, blended_target, mask)
-    composited = blended_target * (1.0 - mask[..., None]) + warped_source * mask[..., None]
+    warped_source = _harmonize_face(warped_source, original_target, mask)
+    composited = original_target * (1.0 - mask[..., None]) + warped_source * mask[..., None]
 
     output = target.clone()
     output[0, top:bottom, left:right, :3] = composited.to(device=target.device, dtype=target.dtype)
@@ -555,12 +561,19 @@ class MediaPipeFaceTransfer(io.ComfyNode):
                 FaceDetectionType.Input("face_detection_model"),
                 io.Image.Input("source_image"),
                 io.Image.Input("target_image"),
+                io.Float.Input("source_scale", default=1.08, min=0.9, max=1.3, step=0.01, advanced=True,
+                               tooltip="Scales the source face coverage while keeping feature centers aligned."),
+                io.Float.Input("edge_feather", default=8.0, min=1.0, max=25.0, step=0.5, advanced=True,
+                               tooltip="Width of the source-to-target transition as a percentage of face size."),
+                io.Float.Input("forehead_coverage", default=0.5, min=0.0, max=1.0, step=0.05, advanced=True,
+                               tooltip="Extends valid forehead coverage from the eyes toward the face oval. Strong color edges such as bangs remain excluded."),
             ],
             outputs=[io.Image.Output()],
         )
 
     @classmethod
-    def execute(cls, face_detection_model, source_image, target_image) -> io.NodeOutput:
+    def execute(cls, face_detection_model, source_image, target_image, source_scale=1.08,
+                edge_feather=8.0, forehead_coverage=0.5) -> io.NodeOutput:
         source_batch = source_image.shape[0]
         target_batch = target_image.shape[0]
         if source_batch not in (1, target_batch):
@@ -585,6 +598,9 @@ class MediaPipeFaceTransfer(io.ComfyNode):
                 source_faces[source_index],
                 target_faces[i],
                 connection_sets,
+                source_scale,
+                edge_feather,
+                forehead_coverage,
             ))
         return io.NodeOutput(torch.cat(output, dim=0))
 
