@@ -29,6 +29,7 @@ def _face_data():
         "right_eyebrow": _edges(list(range(20, 24))),
         "lips": _edges(list(range(24, 28))),
         "nose": _edges(list(range(28, 32))),
+        "tesselation": _edges(list(range(8))) | frozenset((31, vertex) for vertex in range(8)),
     }
     return canonical, connection_sets
 
@@ -43,15 +44,32 @@ def _face(canonical, center, scale):
     }
 
 
-def test_thin_plate_spline_reproduces_affine_mapping():
-    control = np.array([[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0], [0.0, 0.0]])
-    values = control @ np.array([[1.2, 0.3], [-0.2, 0.8]]) + np.array([0.4, -0.7])
-    weights, affine = mediapipe_nodes._solve_thin_plate_spline(control, values)
-    points = np.array([[-0.5, 0.25], [0.2, -0.8], [0.75, 0.6]])
+def test_mesh_triangles_reconstruct_faces():
+    edges = frozenset({(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)})
 
-    actual = mediapipe_nodes._evaluate_thin_plate_spline(points, control, weights, affine)
-    expected = points @ np.array([[1.2, 0.3], [-0.2, 0.8]]) + np.array([0.4, -0.7])
-    np.testing.assert_allclose(actual, expected, atol=1e-6)
+    triangles = mediapipe_nodes._mesh_triangles(edges)
+
+    np.testing.assert_array_equal(triangles, np.array([[0, 1, 2], [0, 2, 3]]))
+
+
+def test_mesh_warp_reproduces_affine_mapping():
+    target = np.array([[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0]])
+    source = target @ np.array([[1.2, 0.3], [-0.2, 0.8]]) + np.array([0.4, 0.7])
+    triangles = np.array([[0, 1, 2], [0, 2, 3]])
+
+    points, coverage = mediapipe_nodes._mesh_warp_points(source, target, triangles, 0, 0, 4, 4)
+
+    assert coverage[1, 2]
+    np.testing.assert_allclose(points[1, 2], np.array([2.0, 1.0]) @ np.array([[1.2, 0.3], [-0.2, 0.8]]) + np.array([0.4, 0.7]))
+
+
+def test_mesh_warp_rejects_flipped_triangle():
+    source = np.array([[0.0, 0.0], [3.0, 0.0], [0.0, 3.0]])
+    target = source[[0, 2, 1]]
+
+    _, coverage = mediapipe_nodes._mesh_warp_points(source, target, np.array([[0, 1, 2]]), 0, 0, 4, 4)
+
+    assert not coverage.any()
 
 
 def test_transfer_anchors_use_feature_centers_only():
@@ -215,7 +233,8 @@ def test_transfer_preserves_target_outside_face_region():
     ], dim=-1)[None]
     target = torch.full((1, 64, 64, 3), 0.2)
 
-    output = mediapipe_nodes._transfer_face(source, target, source_face, target_face, connection_sets)
+    triangles = mediapipe_nodes._mesh_triangles(connection_sets["tesselation"])
+    output = mediapipe_nodes._transfer_face(source, target, source_face, target_face, connection_sets, triangles)
 
     assert output.shape == target.shape
     assert output.dtype == target.dtype
@@ -233,7 +252,10 @@ def test_node_broadcasts_single_source(monkeypatch):
         "_transfer_face",
         lambda source, target, *_args: target + source.mean(),
     )
-    model = type("Model", (), {"connection_sets": {}, "canonical_data": {"canonical_vertices": np.empty((0, 3))}})()
+    model = type("Model", (), {
+        "connection_sets": {"tesselation": frozenset({(0, 1), (1, 2), (0, 2)})},
+        "canonical_data": {"canonical_vertices": np.empty((0, 3))},
+    })()
     source = torch.ones((1, 8, 8, 3))
     target = torch.zeros((3, 8, 8, 3))
 

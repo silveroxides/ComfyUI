@@ -221,34 +221,71 @@ def _face_transfer_anchors(face: dict, connection_sets: dict[str, frozenset]) ->
     return np.asarray(anchors, dtype=np.float64)
 
 
-def _solve_thin_plate_spline(control: np.ndarray, values: np.ndarray, smoothing: float = 1e-4):
-    if control.shape != values.shape or control.ndim != 2 or control.shape[1] != 2 or control.shape[0] < 3:
-        raise ValueError("Face transfer requires matching two-dimensional landmark anchors.")
-
-    distances_sq = ((control[:, None] - control[None]) ** 2).sum(axis=2)
-    kernel = distances_sq * np.log(distances_sq + 1e-12)
-    affine = np.column_stack([np.ones(control.shape[0]), control])
-    system = np.block([
-        [kernel + np.eye(control.shape[0]) * smoothing, affine],
-        [affine.T, np.zeros((3, 3))],
-    ])
-    targets = np.vstack([values, np.zeros((3, 2))])
-    try:
-        coefficients = np.linalg.solve(system, targets)
-    except np.linalg.LinAlgError as error:
-        raise ValueError("Face transfer could not solve the landmark deformation.") from error
-    return coefficients[:control.shape[0]], coefficients[control.shape[0]:]
+def _mesh_triangles(edges: frozenset[tuple[int, int]]) -> np.ndarray:
+    adjacency: dict[int, set[int]] = {}
+    for a, b in edges:
+        adjacency.setdefault(a, set()).add(b)
+        adjacency.setdefault(b, set()).add(a)
+    triangles = {
+        tuple(sorted((a, b, c)))
+        for a, neighbors in adjacency.items()
+        for b in neighbors
+        for c in neighbors & adjacency[b]
+        if a < b < c
+    }
+    if not triangles:
+        raise ValueError("Face transfer requires the MediaPipe face tessellation topology.")
+    return np.asarray(sorted(triangles), dtype=np.int32)
 
 
-def _evaluate_thin_plate_spline(points: np.ndarray, control: np.ndarray, weights: np.ndarray, affine: np.ndarray) -> np.ndarray:
-    output = np.empty_like(points, dtype=np.float64)
-    chunk = 65536
-    for start in range(0, points.shape[0], chunk):
-        current = points[start:start + chunk]
-        distances_sq = ((current[:, None] - control[None]) ** 2).sum(axis=2)
-        kernel = distances_sq * np.log(distances_sq + 1e-12)
-        output[start:start + chunk] = kernel @ weights + np.column_stack([np.ones(current.shape[0]), current]) @ affine
-    return output
+def _mesh_warp_points(source_landmarks: np.ndarray, target_landmarks: np.ndarray, triangles: np.ndarray,
+                      left: int, top: int, right: int, bottom: int,
+                      target_depth: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    height, width = bottom - top, right - left
+    source_points = np.zeros((height, width, 2), dtype=np.float64)
+    coverage = np.zeros((height, width), dtype=bool)
+    depth_buffer = np.full((height, width), np.inf, dtype=np.float64)
+
+    for triangle in triangles:
+        source_triangle = source_landmarks[triangle].astype(np.float64)
+        target_triangle = target_landmarks[triangle].astype(np.float64)
+        x0, y0 = target_triangle[0]
+        x1, y1 = target_triangle[1]
+        x2, y2 = target_triangle[2]
+        denominator = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
+        source_edge1 = source_triangle[1] - source_triangle[0]
+        source_edge2 = source_triangle[2] - source_triangle[0]
+        source_denominator = source_edge1[0] * source_edge2[1] - source_edge1[1] * source_edge2[0]
+        if abs(denominator) < 1e-6 or abs(source_denominator) < 1e-6 or denominator * source_denominator <= 0.0:
+            continue
+
+        x_start = max(left, int(np.floor(target_triangle[:, 0].min())))
+        x_end = min(right - 1, int(np.ceil(target_triangle[:, 0].max())))
+        y_start = max(top, int(np.floor(target_triangle[:, 1].min())))
+        y_end = min(bottom - 1, int(np.ceil(target_triangle[:, 1].max())))
+        if x_end < x_start or y_end < y_start:
+            continue
+
+        yy, xx = np.mgrid[y_start:y_end + 1, x_start:x_end + 1]
+        weight0 = ((y1 - y2) * (xx - x2) + (x2 - x1) * (yy - y2)) / denominator
+        weight1 = ((y2 - y0) * (xx - x2) + (x0 - x2) * (yy - y2)) / denominator
+        weight2 = 1.0 - weight0 - weight1
+        inside = (weight0 >= -1e-6) & (weight1 >= -1e-6) & (weight2 >= -1e-6)
+        if not inside.any():
+            continue
+
+        local_y = slice(y_start - top, y_end - top + 1)
+        local_x = slice(x_start - left, x_end - left + 1)
+        if target_depth is not None:
+            depth = weight0 * target_depth[triangle[0]] + weight1 * target_depth[triangle[1]] + weight2 * target_depth[triangle[2]]
+            inside &= depth < depth_buffer[local_y, local_x]
+            depth_buffer[local_y, local_x][inside] = depth[inside]
+
+        mapped = weight0[..., None] * source_triangle[0] + weight1[..., None] * source_triangle[1] + weight2[..., None] * source_triangle[2]
+        source_points[local_y, local_x][inside] = mapped[inside]
+        coverage[local_y, local_x][inside] = True
+
+    return source_points, coverage
 
 
 def _face_oval(face: dict, connection_sets: dict[str, frozenset]) -> np.ndarray:
@@ -454,14 +491,12 @@ def _detect_largest_faces(face_detection_model, images: torch.Tensor) -> list[di
 
 
 def _transfer_face(source: torch.Tensor, target: torch.Tensor, source_face: dict, target_face: dict,
-                   connection_sets: dict[str, frozenset], source_scale_factor: float = 1.08,
+                   connection_sets: dict[str, frozenset], triangles: np.ndarray, source_scale_factor: float = 1.08,
                    edge_feather: float = 8.0, forehead_coverage: float = 0.5,
                    color_match: float = 0.5, lighting_match: float = 0.5) -> torch.Tensor:
     source_center, source_scale = _face_scale(source_face)
     target_center, target_scale = _face_scale(target_face)
-    source_anchors = (_face_transfer_anchors(source_face, connection_sets) - source_center) / source_scale
     target_anchors = (_face_transfer_anchors(target_face, connection_sets) - target_center) / target_scale
-    source_weights, source_affine = _solve_thin_plate_spline(target_anchors, source_anchors, smoothing=0.01)
 
     x1, y1, x2, y2 = (float(v) for v in target_face["bbox_xyxy"])
     padding = max(2, round(target_scale * 0.04))
@@ -474,8 +509,16 @@ def _transfer_face(source: torch.Tensor, target: torch.Tensor, source_face: dict
 
     yy, xx = np.mgrid[top:bottom, left:right]
     target_points = np.column_stack([xx.reshape(-1), yy.reshape(-1)]).astype(np.float64)
+    target_depth = target_face.get("landmarks_3d")
+    if target_depth is not None:
+        target_depth = target_depth[:, 2]
+    source_points, mesh_coverage = _mesh_warp_points(
+        source_face["landmarks_xy"], target_face["landmarks_xy"], triangles,
+        left, top, right, bottom, target_depth,
+    )
+    source_points = source_points.reshape(-1, 2)
     target_normalized = (target_points - target_center) / target_scale
-    source_normalized = _evaluate_thin_plate_spline(target_normalized, target_anchors, source_weights, source_affine)
+    source_normalized = (source_points - source_center) / source_scale
     anchor_distance = np.sqrt(((target_normalized[:, None] - target_anchors[None]) ** 2).sum(axis=2)).min(axis=1)
     overscale_weight = np.clip(anchor_distance / 0.45, 0.0, 1.0)
     overscale_weight = overscale_weight * overscale_weight * (3.0 - 2.0 * overscale_weight)
@@ -505,7 +548,11 @@ def _transfer_face(source: torch.Tensor, target: torch.Tensor, source_face: dict
     target_mask_grid = _sampling_grid(target_points, target_mask_np.shape[0], target_mask_np.shape[1], target_mask_left, target_mask_top)
     target_mask_grid = torch.from_numpy(target_mask_grid.reshape(bottom - top, right - left, 2)).to(device=source.device, dtype=source.dtype)[None]
     warped_target_mask = F.grid_sample(target_mask, target_mask_grid, mode="bilinear", padding_mode="zeros", align_corners=False)[0, 0]
-    mask = torch.minimum(warped_source_mask, warped_target_mask).clamp(0.0, 1.0)
+    coverage_distance = scipy.ndimage.distance_transform_edt(mesh_coverage)
+    coverage_weight = np.clip(coverage_distance / max(1.0, target_scale * 0.02), 0.0, 1.0)
+    coverage_weight = coverage_weight * coverage_weight * (3.0 - 2.0 * coverage_weight)
+    coverage_weight = torch.from_numpy(coverage_weight).to(device=source.device, dtype=source.dtype)
+    mask = torch.minimum(warped_source_mask, warped_target_mask).clamp(0.0, 1.0) * coverage_weight
 
     original_target = target[0, top:bottom, left:right, :3].to(device=source.device, dtype=source.dtype)
     warped_source = _harmonize_face(warped_source, original_target, mask, color_match, lighting_match)
@@ -677,6 +724,7 @@ class MediaPipeFaceTransfer(io.ComfyNode):
                 raise ValueError(f"Face transfer could not detect a target face in image {i}.")
 
         connection_sets = face_detection_model.connection_sets
+        triangles = _mesh_triangles(connection_sets["tesselation"])
         output = []
         for i in range(target_batch):
             source_index = 0 if source_batch == 1 else i
@@ -686,6 +734,7 @@ class MediaPipeFaceTransfer(io.ComfyNode):
                 source_faces[source_index],
                 target_faces[i],
                 connection_sets,
+                triangles,
                 source_scale,
                 edge_feather,
                 forehead_coverage,
