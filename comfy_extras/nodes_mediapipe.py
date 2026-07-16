@@ -321,35 +321,31 @@ def _face_transfer_mask(height: int, width: int, face: dict, connection_sets: di
             high = max(low + 0.08, 0.22)
             color_edge = np.clip((color_distance - low) / (high - low), 0.0, 1.0)
             color_edge = color_edge * color_edge * (3.0 - 2.0 * color_edge)
+            smooth_image = scipy.ndimage.gaussian_filter(image_crop, sigma=(1.0, 1.0, 0.0))
+            gradient_x = np.stack([scipy.ndimage.sobel(smooth_image[..., channel], axis=1) for channel in range(3)], axis=2) * 0.25
+            gradient_y = np.stack([scipy.ndimage.sobel(smooth_image[..., channel], axis=0) for channel in range(3)], axis=2) * 0.25
+            strong_edge = np.sqrt(((gradient_x ** 2 + gradient_y ** 2).mean(axis=2))) > 0.08
             eyebrow_top = float(np.min((eyebrows - eye_center) @ vertical))
             forehead = np.clip(1.0 - (relative_y - eyebrow_top) / max(vertical_length * 0.10, 1.0), 0.0, 1.0)
             forehead = forehead * forehead * (3.0 - 2.0 * forehead)
             oval_distance = scipy.ndimage.distance_transform_edt(oval)
             outer = np.clip(1.0 - oval_distance / max(scale * 0.12, 1.0), 0.0, 1.0)
             occlusion_zone = np.maximum(forehead, outer)
-            horizontal = np.array([vertical[1], -vertical[0]])
-            relative_x = (xx - eye_center[0]) * horizontal[0] + (yy - eye_center[1]) * horizontal[1]
             protected = np.zeros_like(oval)
-            for eye_name, eyebrow_name in (("left_eye", "left_eyebrow"), ("right_eye", "right_eyebrow")):
-                eye = landmarks[_edge_vertices(connection_sets[eye_name])]
-                eyebrow = landmarks[_edge_vertices(connection_sets[eyebrow_name])]
-                feature = np.concatenate([eye, eyebrow])
-                feature_x = (feature - eye_center) @ horizontal
-                eye_y = (eye - eye_center) @ vertical
-                eyebrow_y = (eyebrow - eye_center) @ vertical
-                protected |= (
-                    (relative_x >= feature_x.min() - scale * 0.08)
-                    & (relative_x <= feature_x.max() + scale * 0.08)
-                    & (relative_y >= eyebrow_y.max())
-                    & (relative_y <= eye_y.max() + scale * 0.04)
-                )
+            for eye_name in ("left_eye", "right_eye"):
+                rings = _ordered_rings(connection_sets[eye_name])
+                if rings:
+                    eye = landmarks[max(rings, key=len)]
+                    eye_mask = _polygon_mask(bottom - top_offset, right - left, eye, left, top_offset) > 0.5
+                    protected |= scipy.ndimage.distance_transform_edt(~eye_mask) <= max(1.0, scale * 0.04)
             candidates = oval & ~protected & (color_edge > 0.25) & (occlusion_zone > 0.05)
             labels, count = scipy.ndimage.label(candidates, structure=np.ones((3, 3), dtype=np.uint8))
             if count > 0:
                 boundary = oval & (oval_distance <= max(2.0, blend_width * 1.5))
                 sizes = np.bincount(labels.ravel())
                 touches_boundary = np.bincount(labels.ravel(), weights=boundary.ravel(), minlength=sizes.shape[0]) > 0
-                keep = (sizes >= max(16, round(int(oval.sum()) * 0.005))) & touches_boundary
+                edge_pixels = np.bincount(labels.ravel(), weights=strong_edge.ravel(), minlength=sizes.shape[0])
+                keep = (sizes >= max(16, round(int(oval.sum()) * 0.005))) & touches_boundary & (edge_pixels >= np.maximum(2, sizes * 0.01))
                 keep[0] = False
                 mask *= 1.0 - color_edge * occlusion_zone * keep[labels]
 
@@ -409,9 +405,10 @@ def _large_regions(mask: np.ndarray, minimum_area: int) -> np.ndarray:
     return keep[labels]
 
 
-def _harmonize_face(source: torch.Tensor, target: torch.Tensor, mask: torch.Tensor, strength: float = 1.0) -> torch.Tensor:
+def _harmonize_face(source: torch.Tensor, target: torch.Tensor, mask: torch.Tensor,
+                    color_match: float = 0.5, lighting_match: float = 0.5) -> torch.Tensor:
     active = mask.detach().cpu().numpy() > 0.01
-    if strength <= 0.0 or int(active.sum()) < 16:
+    if (color_match <= 0.0 and lighting_match <= 0.0) or int(active.sum()) < 16:
         return source
 
     source_rgb = source.detach().float().cpu().numpy()
@@ -432,8 +429,9 @@ def _harmonize_face(source: torch.Tensor, target: torch.Tensor, mask: torch.Tens
     gradient_limit = float(np.percentile(gradient[active], 70))
     candidates = active & (similarity > 0.15) & (gradient <= gradient_limit)
     regions = _large_regions(candidates, max(32, round(int(active.sum()) * 0.01)))
-    weight = similarity * regions * strength
-    matched_lab = source_lab + (target_base - source_base) * weight[..., None]
+    weight = similarity * regions
+    channel_weight = np.array([lighting_match, color_match, color_match], dtype=np.float32)
+    matched_lab = source_lab + (target_base - source_base) * weight[..., None] * channel_weight
     matched_rgb = torch.from_numpy(_lab_to_rgb(matched_lab)).to(device=source.device, dtype=source.dtype)
     return matched_rgb
 
@@ -458,7 +456,7 @@ def _detect_largest_faces(face_detection_model, images: torch.Tensor) -> list[di
 def _transfer_face(source: torch.Tensor, target: torch.Tensor, source_face: dict, target_face: dict,
                    connection_sets: dict[str, frozenset], source_scale_factor: float = 1.08,
                    edge_feather: float = 8.0, forehead_coverage: float = 0.5,
-                   property_match: float = 1.0) -> torch.Tensor:
+                   color_match: float = 0.5, lighting_match: float = 0.5) -> torch.Tensor:
     source_center, source_scale = _face_scale(source_face)
     target_center, target_scale = _face_scale(target_face)
     source_anchors = (_face_transfer_anchors(source_face, connection_sets) - source_center) / source_scale
@@ -510,7 +508,7 @@ def _transfer_face(source: torch.Tensor, target: torch.Tensor, source_face: dict
     mask = torch.minimum(warped_source_mask, warped_target_mask).clamp(0.0, 1.0)
 
     original_target = target[0, top:bottom, left:right, :3].to(device=source.device, dtype=source.dtype)
-    warped_source = _harmonize_face(warped_source, original_target, mask, property_match)
+    warped_source = _harmonize_face(warped_source, original_target, mask, color_match, lighting_match)
     composited = original_target * (1.0 - mask[..., None]) + warped_source * mask[..., None]
 
     output = target.clone()
@@ -653,15 +651,17 @@ class MediaPipeFaceTransfer(io.ComfyNode):
                                tooltip="Width of the source-to-target transition as a percentage of face size."),
                 io.Float.Input("forehead_coverage", default=0.5, min=0.0, max=1.0, step=0.05, advanced=True,
                                tooltip="Extends valid forehead coverage from the eyes toward the face oval. Strong color edges such as bangs remain excluded."),
-                io.Float.Input("property_match", default=1.0, min=0.0, max=1.0, step=0.05, advanced=True,
-                               tooltip="Transfers target color and lighting into large similar-color face regions while preserving source detail."),
+                io.Float.Input("color_match", default=0.5, min=0.0, max=1.0, step=0.05, advanced=True,
+                               tooltip="Matches target color in large similar-color face regions."),
+                io.Float.Input("lighting_match", default=0.5, min=0.0, max=1.0, step=0.05, advanced=True,
+                               tooltip="Matches target lighting in large similar-color face regions."),
             ],
             outputs=[io.Image.Output()],
         )
 
     @classmethod
     def execute(cls, face_detection_model, source_image, target_image, source_scale=1.08,
-                edge_feather=8.0, forehead_coverage=0.5, property_match=1.0) -> io.NodeOutput:
+                edge_feather=8.0, forehead_coverage=0.5, color_match=0.5, lighting_match=0.5) -> io.NodeOutput:
         source_batch = source_image.shape[0]
         target_batch = target_image.shape[0]
         if source_batch not in (1, target_batch):
@@ -689,7 +689,8 @@ class MediaPipeFaceTransfer(io.ComfyNode):
                 source_scale,
                 edge_feather,
                 forehead_coverage,
-                property_match,
+                color_match,
+                lighting_match,
             ))
         return io.NodeOutput(torch.cat(output, dim=0))
 

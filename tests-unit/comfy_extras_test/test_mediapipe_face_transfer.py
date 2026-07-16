@@ -92,11 +92,29 @@ def test_transfer_mask_excludes_forehead_color_edges():
     assert edge_aware[12 - top, 15 - left] < geometric[12 - top, 15 - left]
 
 
-def test_transfer_mask_preserves_isolated_makeup():
+def test_transfer_mask_preserves_makeup_near_eye():
     canonical, connection_sets = _face_data()
     face = _face(canonical, (20, 20), 12)
     image = torch.full((1, 48, 48, 3), 0.6)
-    image[:, 14:20, 10:19] = 0.0
+    image[:, 13:22, 7:18] = 0.0
+
+    geometric, left, top = mediapipe_nodes._face_transfer_mask(
+        48, 48, face, connection_sets, forehead_coverage=1.0,
+    )
+    edge_aware, _, _ = mediapipe_nodes._face_transfer_mask(
+        48, 48, face, connection_sets, forehead_coverage=1.0, image=image,
+    )
+
+    assert edge_aware[17 - top, 9 - left] < geometric[17 - top, 9 - left]
+    assert edge_aware[17 - top, 15 - left] == geometric[17 - top, 15 - left]
+
+
+def test_transfer_mask_preserves_smooth_cheek_highlight():
+    canonical, connection_sets = _face_data()
+    face = _face(canonical, (20, 20), 12)
+    _, xx = torch.meshgrid(torch.arange(48), torch.arange(48), indexing="ij")
+    highlight = 0.45 * torch.sigmoid((14.0 - xx) / 3.0)
+    image = torch.full((1, 48, 48, 3), 0.4) + highlight[None, :, :, None]
 
     geometric, _, _ = mediapipe_nodes._face_transfer_mask(
         48, 48, face, connection_sets, forehead_coverage=1.0,
@@ -108,7 +126,7 @@ def test_transfer_mask_preserves_isolated_makeup():
     np.testing.assert_allclose(edge_aware, geometric)
 
 
-def test_property_match_targets_large_similar_color_regions():
+def test_face_matching_targets_large_similar_color_regions():
     source = torch.empty((32, 32, 3))
     source[:] = torch.tensor([0.70, 0.45, 0.40])
     target = torch.empty_like(source)
@@ -117,10 +135,29 @@ def test_property_match_targets_large_similar_color_regions():
     target[12:16, 8:12] = 0.90
     mask = torch.ones((32, 32))
 
-    output = mediapipe_nodes._harmonize_face(source, target, mask)
+    output = mediapipe_nodes._harmonize_face(source, target, mask, 1.0, 1.0)
 
     assert torch.linalg.vector_norm(output[4, 4] - target[4, 4]) < torch.linalg.vector_norm(source[4, 4] - target[4, 4])
     torch.testing.assert_close(output[13, 9], source[13, 9], atol=1e-4, rtol=0)
+
+
+def test_color_and_lighting_matching_are_independent():
+    source = torch.empty((32, 32, 3))
+    source[:] = torch.tensor([0.55, 0.35, 0.30])
+    target = torch.empty_like(source)
+    target[:] = torch.tensor([0.70, 0.50, 0.38])
+    mask = torch.ones((32, 32))
+
+    color = mediapipe_nodes._harmonize_face(source, target, mask, 1.0, 0.0)
+    lighting = mediapipe_nodes._harmonize_face(source, target, mask, 0.0, 1.0)
+    source_lab = mediapipe_nodes._rgb_to_lab(source.numpy())[0, 0]
+    color_lab = mediapipe_nodes._rgb_to_lab(color.numpy())[0, 0]
+    lighting_lab = mediapipe_nodes._rgb_to_lab(lighting.numpy())[0, 0]
+
+    assert abs(color_lab[0] - source_lab[0]) < 1e-3
+    assert np.linalg.norm(color_lab[1:] - source_lab[1:]) > 1.0
+    assert abs(lighting_lab[0] - source_lab[0]) > 1.0
+    np.testing.assert_allclose(lighting_lab[1:], source_lab[1:], atol=1e-3)
 
 
 def test_large_regions_remove_small_components():
