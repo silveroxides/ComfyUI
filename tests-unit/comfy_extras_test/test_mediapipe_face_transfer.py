@@ -260,10 +260,9 @@ def test_largest_face_uses_landmark_area():
     assert mediapipe_nodes._largest_face([]) is None
 
 
-def test_detection_selects_largest_and_retries_missing_with_full_range():
+def test_detection_selects_largest_with_full_range_detector():
     small = {"bbox_xyxy": np.array([0, 0, 5, 5])}
     large = {"bbox_xyxy": np.array([0, 0, 10, 10])}
-    fallback = {"bbox_xyxy": np.array([0, 0, 7, 8])}
 
     class Model:
         def __init__(self):
@@ -271,15 +270,13 @@ def test_detection_selects_largest_and_retries_missing_with_full_range():
 
         def detect_batch(self, images, num_faces, score_thresh, variant):
             self.calls.append((len(images), num_faces, score_thresh, variant))
-            if variant == "short":
-                return [[small, large], []]
-            return [[fallback]]
+            return [[small, large], []]
 
     model = Model()
     detected = mediapipe_nodes._detect_largest_faces(model, torch.zeros((2, 8, 8, 3)))
 
-    assert detected == [large, fallback]
-    assert model.calls == [(2, 0, 0.5, "short"), (1, 0, 0.5, "full")]
+    assert detected == [large, None]
+    assert model.calls == [(2, 0, 0.5, "full")]
 
 
 def test_transfer_preserves_target_outside_face_region():

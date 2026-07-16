@@ -596,12 +596,7 @@ def _largest_face(faces: list[dict]) -> dict | None:
 
 def _detect_largest_faces(face_detection_model, images: torch.Tensor) -> list[dict | None]:
     images_np = list(_image_to_uint8(images))
-    detected = face_detection_model.detect_batch(images_np, num_faces=0, score_thresh=0.5, variant="short")
-    missing = [i for i, faces in enumerate(detected) if not faces]
-    if missing:
-        fallback = face_detection_model.detect_batch([images_np[i] for i in missing], num_faces=0, score_thresh=0.5, variant="full")
-        for index, faces in zip(missing, fallback):
-            detected[index] = faces
+    detected = face_detection_model.detect_batch(images_np, num_faces=0, score_thresh=0.5, variant="full")
     return [_largest_face(faces) for faces in detected]
 
 
