@@ -331,26 +331,79 @@ def _sampling_grid(points: np.ndarray, height: int, width: int, left: int = 0, t
     ])
 
 
-def _harmonize_face(source: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    selected = mask > 0.8
-    if int(selected.sum()) < 16:
+def _rgb_to_lab(rgb: np.ndarray) -> np.ndarray:
+    linear = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+    matrix = np.array([
+        [0.4124564, 0.3575761, 0.1804375],
+        [0.2126729, 0.7151522, 0.0721750],
+        [0.0193339, 0.1191920, 0.9503041],
+    ], dtype=np.float32)
+    xyz = linear @ matrix.T / np.array([0.95047, 1.0, 1.08883], dtype=np.float32)
+    threshold = (6.0 / 29.0) ** 3
+    transformed = np.where(xyz > threshold, np.cbrt(xyz), xyz / (3.0 * (6.0 / 29.0) ** 2) + 4.0 / 29.0)
+    return np.stack([
+        116.0 * transformed[..., 1] - 16.0,
+        500.0 * (transformed[..., 0] - transformed[..., 1]),
+        200.0 * (transformed[..., 1] - transformed[..., 2]),
+    ], axis=-1).astype(np.float32)
+
+
+def _lab_to_rgb(lab: np.ndarray) -> np.ndarray:
+    fy = (lab[..., 0] + 16.0) / 116.0
+    fx = fy + lab[..., 1] / 500.0
+    fz = fy - lab[..., 2] / 200.0
+    threshold = 6.0 / 29.0
+    xyz = np.stack([fx, fy, fz], axis=-1)
+    xyz = np.where(xyz > threshold, xyz ** 3, 3.0 * threshold ** 2 * (xyz - 4.0 / 29.0))
+    xyz *= np.array([0.95047, 1.0, 1.08883], dtype=np.float32)
+    matrix = np.array([
+        [3.2404542, -1.5371385, -0.4985314],
+        [-0.9692660, 1.8760108, 0.0415560],
+        [0.0556434, -0.2040259, 1.0572252],
+    ], dtype=np.float32)
+    linear = xyz @ matrix.T
+    positive = np.maximum(linear, 0.0)
+    rgb = np.where(linear <= 0.0031308, 12.92 * linear, 1.055 * positive ** (1.0 / 2.4) - 0.055)
+    return np.clip(rgb, 0.0, 1.0).astype(np.float32)
+
+
+def _large_regions(mask: np.ndarray, minimum_area: int) -> np.ndarray:
+    labels, count = scipy.ndimage.label(mask, structure=np.ones((3, 3), dtype=np.uint8))
+    if count == 0:
+        return np.zeros_like(mask, dtype=bool)
+    sizes = np.bincount(labels.ravel())
+    keep = sizes >= minimum_area
+    keep[0] = False
+    return keep[labels]
+
+
+def _harmonize_face(source: torch.Tensor, target: torch.Tensor, mask: torch.Tensor, strength: float = 1.0) -> torch.Tensor:
+    active = mask.detach().cpu().numpy() > 0.01
+    if strength <= 0.0 or int(active.sum()) < 16:
         return source
 
-    source_pixels = source[selected]
-    target_pixels = target[selected]
-    source_mean = source_pixels.mean(dim=0)
-    target_mean = target_pixels.mean(dim=0)
-    source_std = source_pixels.std(dim=0).clamp_min(1e-4)
-    target_std = target_pixels.std(dim=0)
-    scale = (target_std / source_std).clamp(0.75, 1.3333333333333333)
-    matched = (source - source_mean) * scale + target_mean
+    source_rgb = source.detach().float().cpu().numpy()
+    target_rgb = target.detach().float().cpu().numpy()
+    source_lab = _rgb_to_lab(source_rgb)
+    target_lab = _rgb_to_lab(target_rgb)
+    sigma = max(1.0, max(source.shape[0], source.shape[1]) * 0.025)
+    source_base = scipy.ndimage.gaussian_filter(source_lab, sigma=(sigma, sigma, 0))
+    target_base = scipy.ndimage.gaussian_filter(target_lab, sigma=(sigma, sigma, 0))
 
-    hard_mask = (mask > 0.5).detach().cpu().numpy()
-    distance = scipy.ndimage.distance_transform_edt(hard_mask)
-    falloff = max(mask.shape[0], mask.shape[1]) * 0.12
-    edge_weight = 0.25 + 0.75 * np.exp(-distance / max(falloff, 1.0))
-    edge_weight = torch.from_numpy(edge_weight).to(device=source.device, dtype=source.dtype)
-    return (source + (matched - source) * edge_weight[..., None]).clamp(0.0, 1.0)
+    difference = source_base - target_base
+    color_distance = np.sqrt((difference[..., 0] * 0.5) ** 2 + difference[..., 1] ** 2 + difference[..., 2] ** 2)
+    similarity = np.clip((35.0 - color_distance) / 27.0, 0.0, 1.0)
+    similarity = similarity * similarity * (3.0 - 2.0 * similarity)
+    source_gradient = np.sqrt(sum(scipy.ndimage.sobel(source_base[..., channel], axis=0) ** 2 + scipy.ndimage.sobel(source_base[..., channel], axis=1) ** 2 for channel in range(3)))
+    target_gradient = np.sqrt(sum(scipy.ndimage.sobel(target_base[..., channel], axis=0) ** 2 + scipy.ndimage.sobel(target_base[..., channel], axis=1) ** 2 for channel in range(3)))
+    gradient = np.maximum(source_gradient, target_gradient)
+    gradient_limit = float(np.percentile(gradient[active], 70))
+    candidates = active & (similarity > 0.15) & (gradient <= gradient_limit)
+    regions = _large_regions(candidates, max(32, round(int(active.sum()) * 0.01)))
+    weight = similarity * regions * strength
+    matched_lab = source_lab + (target_base - source_base) * weight[..., None]
+    matched_rgb = torch.from_numpy(_lab_to_rgb(matched_lab)).to(device=source.device, dtype=source.dtype)
+    return matched_rgb
 
 
 def _largest_face(faces: list[dict]) -> dict | None:
@@ -372,7 +425,8 @@ def _detect_largest_faces(face_detection_model, images: torch.Tensor) -> list[di
 
 def _transfer_face(source: torch.Tensor, target: torch.Tensor, source_face: dict, target_face: dict,
                    connection_sets: dict[str, frozenset], source_scale_factor: float = 1.08,
-                   edge_feather: float = 8.0, forehead_coverage: float = 0.5) -> torch.Tensor:
+                   edge_feather: float = 8.0, forehead_coverage: float = 0.5,
+                   property_match: float = 1.0) -> torch.Tensor:
     source_center, source_scale = _face_scale(source_face)
     target_center, target_scale = _face_scale(target_face)
     source_anchors = (_face_transfer_anchors(source_face, connection_sets) - source_center) / source_scale
@@ -424,7 +478,7 @@ def _transfer_face(source: torch.Tensor, target: torch.Tensor, source_face: dict
     mask = torch.minimum(warped_source_mask, warped_target_mask).clamp(0.0, 1.0)
 
     original_target = target[0, top:bottom, left:right, :3].to(device=source.device, dtype=source.dtype)
-    warped_source = _harmonize_face(warped_source, original_target, mask)
+    warped_source = _harmonize_face(warped_source, original_target, mask, property_match)
     composited = original_target * (1.0 - mask[..., None]) + warped_source * mask[..., None]
 
     output = target.clone()
@@ -567,13 +621,15 @@ class MediaPipeFaceTransfer(io.ComfyNode):
                                tooltip="Width of the source-to-target transition as a percentage of face size."),
                 io.Float.Input("forehead_coverage", default=0.5, min=0.0, max=1.0, step=0.05, advanced=True,
                                tooltip="Extends valid forehead coverage from the eyes toward the face oval. Strong color edges such as bangs remain excluded."),
+                io.Float.Input("property_match", default=1.0, min=0.0, max=1.0, step=0.05, advanced=True,
+                               tooltip="Transfers target color and lighting into large similar-color face regions while preserving source detail."),
             ],
             outputs=[io.Image.Output()],
         )
 
     @classmethod
     def execute(cls, face_detection_model, source_image, target_image, source_scale=1.08,
-                edge_feather=8.0, forehead_coverage=0.5) -> io.NodeOutput:
+                edge_feather=8.0, forehead_coverage=0.5, property_match=1.0) -> io.NodeOutput:
         source_batch = source_image.shape[0]
         target_batch = target_image.shape[0]
         if source_batch not in (1, target_batch):
@@ -601,6 +657,7 @@ class MediaPipeFaceTransfer(io.ComfyNode):
                 source_scale,
                 edge_feather,
                 forehead_coverage,
+                property_match,
             ))
         return io.NodeOutput(torch.cat(output, dim=0))
 

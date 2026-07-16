@@ -91,6 +91,32 @@ def test_transfer_mask_excludes_forehead_color_edges():
     assert edge_aware.sum() < geometric.sum()
 
 
+def test_property_match_targets_large_similar_color_regions():
+    source = torch.empty((32, 32, 3))
+    source[:] = torch.tensor([0.70, 0.45, 0.40])
+    target = torch.empty_like(source)
+    target[:] = torch.tensor([0.76, 0.60, 0.46])
+    source[12:16, 8:12] = 0.05
+    target[12:16, 8:12] = 0.90
+    mask = torch.ones((32, 32))
+
+    output = mediapipe_nodes._harmonize_face(source, target, mask)
+
+    assert torch.linalg.vector_norm(output[4, 4] - target[4, 4]) < torch.linalg.vector_norm(source[4, 4] - target[4, 4])
+    torch.testing.assert_close(output[13, 9], source[13, 9], atol=1e-4, rtol=0)
+
+
+def test_large_regions_remove_small_components():
+    mask = np.zeros((20, 20), dtype=bool)
+    mask[2:12, 2:12] = True
+    mask[16:18, 16:18] = True
+
+    regions = mediapipe_nodes._large_regions(mask, minimum_area=10)
+
+    assert regions[5, 5]
+    assert not regions[16, 16]
+
+
 def test_largest_face_uses_landmark_area():
     faces = [
         {"bbox_xyxy": np.array([0, 0, 10, 20])},
