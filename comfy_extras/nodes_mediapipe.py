@@ -12,7 +12,9 @@ MediaPipeFaceLandmarker also emits the core BOUNDING_BOX type — pair with Draw
 
 
 import numpy as np
+import scipy.ndimage
 import torch
+import torch.nn.functional as F
 from PIL import Image, ImageColor, ImageDraw
 from tqdm.auto import tqdm
 from typing_extensions import override
@@ -195,6 +197,189 @@ def _ordered_rings(edges: frozenset[tuple[int, int]]) -> list[list[int]]:
     return rings
 
 
+_TRANSFER_FEATURES = ("left_eye", "right_eye", "left_eyebrow", "right_eyebrow", "lips", "nose")
+
+
+def _edge_vertices(edges: frozenset[tuple[int, int]]) -> list[int]:
+    return sorted({vertex for edge in edges for vertex in edge})
+
+
+def _face_scale(face: dict) -> tuple[np.ndarray, float]:
+    x1, y1, x2, y2 = (float(v) for v in face["bbox_xyxy"])
+    center = np.array([(x1 + x2) * 0.5, (y1 + y2) * 0.5], dtype=np.float64)
+    scale = max(x2 - x1, y2 - y1) * 0.5
+    if scale < 1.0:
+        raise ValueError("Face transfer requires non-degenerate face landmarks.")
+    return center, scale
+
+
+def _directional_vertices(vertices: list[int], canonical: np.ndarray, directions: int) -> list[int]:
+    points = canonical[vertices, :2].astype(np.float64)
+    points -= points.mean(axis=0, keepdims=True)
+    selected = []
+    for angle in np.linspace(0.0, 2.0 * np.pi, directions, endpoint=False):
+        direction = np.array([np.cos(angle), np.sin(angle)])
+        selected.append(vertices[int(np.argmax(points @ direction))])
+    return list(dict.fromkeys(selected))
+
+
+def _face_transfer_anchors(face: dict, connection_sets: dict[str, frozenset], canonical: np.ndarray) -> np.ndarray:
+    landmarks = face["landmarks_xy"]
+    anchors = []
+    for feature in _TRANSFER_FEATURES:
+        vertices = _edge_vertices(connection_sets[feature])
+        anchors.append(landmarks[vertices].mean(axis=0))
+        anchors.extend(landmarks[i] for i in _directional_vertices(vertices, canonical, 4))
+
+    oval_vertices = _edge_vertices(connection_sets["face_oval"])
+    anchors.append(landmarks[oval_vertices].mean(axis=0))
+    anchors.extend(landmarks[i] for i in _directional_vertices(oval_vertices, canonical, 12))
+    return np.asarray(anchors, dtype=np.float64)
+
+
+def _solve_thin_plate_spline(control: np.ndarray, values: np.ndarray, smoothing: float = 1e-4):
+    if control.shape != values.shape or control.ndim != 2 or control.shape[1] != 2 or control.shape[0] < 3:
+        raise ValueError("Face transfer requires matching two-dimensional landmark anchors.")
+
+    distances_sq = ((control[:, None] - control[None]) ** 2).sum(axis=2)
+    kernel = distances_sq * np.log(distances_sq + 1e-12)
+    affine = np.column_stack([np.ones(control.shape[0]), control])
+    system = np.block([
+        [kernel + np.eye(control.shape[0]) * smoothing, affine],
+        [affine.T, np.zeros((3, 3))],
+    ])
+    targets = np.vstack([values, np.zeros((3, 2))])
+    try:
+        coefficients = np.linalg.solve(system, targets)
+    except np.linalg.LinAlgError as error:
+        raise ValueError("Face transfer could not solve the landmark deformation.") from error
+    return coefficients[:control.shape[0]], coefficients[control.shape[0]:]
+
+
+def _evaluate_thin_plate_spline(points: np.ndarray, control: np.ndarray, weights: np.ndarray, affine: np.ndarray) -> np.ndarray:
+    output = np.empty_like(points, dtype=np.float64)
+    chunk = 65536
+    for start in range(0, points.shape[0], chunk):
+        current = points[start:start + chunk]
+        distances_sq = ((current[:, None] - control[None]) ** 2).sum(axis=2)
+        kernel = distances_sq * np.log(distances_sq + 1e-12)
+        output[start:start + chunk] = kernel @ weights + np.column_stack([np.ones(current.shape[0]), current]) @ affine
+    return output
+
+
+def _face_oval(face: dict, connection_sets: dict[str, frozenset]) -> np.ndarray:
+    rings = _ordered_rings(connection_sets["face_oval"])
+    if not rings:
+        raise ValueError("Face transfer requires the MediaPipe face oval topology.")
+    return face["landmarks_xy"][max(rings, key=len)]
+
+
+def _polygon_mask(height: int, width: int, points: np.ndarray, offset_x: int = 0, offset_y: int = 0) -> np.ndarray:
+    image = Image.new("L", (width, height), 0)
+    ImageDraw.Draw(image).polygon([(float(x) - offset_x, float(y) - offset_y) for x, y in points], fill=255)
+    return np.asarray(image, dtype=np.float32) / 255.0
+
+
+def _blur_mask(mask: torch.Tensor, radius: int) -> torch.Tensor:
+    if radius <= 0:
+        return mask
+    sigma = max(radius * 0.5, 0.5)
+    coordinates = torch.arange(-radius, radius + 1, device=mask.device, dtype=mask.dtype)
+    kernel = torch.exp(-(coordinates ** 2) / (2.0 * sigma ** 2))
+    kernel /= kernel.sum()
+    mask = F.conv2d(mask[None, None], kernel[None, None, None, :], padding=(0, radius))
+    return F.conv2d(mask, kernel[None, None, :, None], padding=(radius, 0))[0, 0]
+
+
+def _harmonize_face(source: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    selected = mask > 0.8
+    if int(selected.sum()) < 16:
+        return source
+
+    source_pixels = source[selected]
+    target_pixels = target[selected]
+    source_mean = source_pixels.mean(dim=0)
+    target_mean = target_pixels.mean(dim=0)
+    source_std = source_pixels.std(dim=0).clamp_min(1e-4)
+    target_std = target_pixels.std(dim=0)
+    scale = (target_std / source_std).clamp(0.75, 1.3333333333333333)
+    matched = (source - source_mean) * scale + target_mean
+
+    hard_mask = (mask > 0.5).detach().cpu().numpy()
+    distance = scipy.ndimage.distance_transform_edt(hard_mask)
+    falloff = max(mask.shape[0], mask.shape[1]) * 0.12
+    edge_weight = 0.25 + 0.75 * np.exp(-distance / max(falloff, 1.0))
+    edge_weight = torch.from_numpy(edge_weight).to(device=source.device, dtype=source.dtype)
+    return (source + (matched - source) * edge_weight[..., None]).clamp(0.0, 1.0)
+
+
+def _largest_face(faces: list[dict]) -> dict | None:
+    if not faces:
+        return None
+    return max(faces, key=lambda face: max(0.0, float(face["bbox_xyxy"][2] - face["bbox_xyxy"][0])) * max(0.0, float(face["bbox_xyxy"][3] - face["bbox_xyxy"][1])))
+
+
+def _detect_largest_faces(face_detection_model, images: torch.Tensor) -> list[dict | None]:
+    images_np = list(_image_to_uint8(images))
+    detected = face_detection_model.detect_batch(images_np, num_faces=0, score_thresh=0.5, variant="short")
+    missing = [i for i, faces in enumerate(detected) if not faces]
+    if missing:
+        fallback = face_detection_model.detect_batch([images_np[i] for i in missing], num_faces=0, score_thresh=0.5, variant="full")
+        for index, faces in zip(missing, fallback):
+            detected[index] = faces
+    return [_largest_face(faces) for faces in detected]
+
+
+def _transfer_face(source: torch.Tensor, target: torch.Tensor, source_face: dict, target_face: dict,
+                   connection_sets: dict[str, frozenset], canonical: np.ndarray) -> torch.Tensor:
+    source_center, source_scale = _face_scale(source_face)
+    target_center, target_scale = _face_scale(target_face)
+    source_anchors = (_face_transfer_anchors(source_face, connection_sets, canonical) - source_center) / source_scale
+    target_anchors = (_face_transfer_anchors(target_face, connection_sets, canonical) - target_center) / target_scale
+    weights, affine = _solve_thin_plate_spline(target_anchors, source_anchors)
+
+    x1, y1, x2, y2 = (float(v) for v in target_face["bbox_xyxy"])
+    feather = max(1, round(target_scale * 0.04))
+    padding = feather * 3
+    left = max(0, int(np.floor(x1)) - padding)
+    top = max(0, int(np.floor(y1)) - padding)
+    right = min(target.shape[2], int(np.ceil(x2)) + padding)
+    bottom = min(target.shape[1], int(np.ceil(y2)) + padding)
+    if right <= left or bottom <= top:
+        raise ValueError("Face transfer produced an empty target region.")
+
+    yy, xx = np.mgrid[top:bottom, left:right]
+    target_points = np.column_stack([xx.reshape(-1), yy.reshape(-1)]).astype(np.float64)
+    target_normalized = (target_points - target_center) / target_scale
+    source_normalized = _evaluate_thin_plate_spline(target_normalized, target_anchors, weights, affine)
+    source_points = source_normalized * source_scale + source_center
+
+    source_height, source_width = source.shape[1:3]
+    grid = np.column_stack([
+        (2.0 * source_points[:, 0] + 1.0) / source_width - 1.0,
+        (2.0 * source_points[:, 1] + 1.0) / source_height - 1.0,
+    ]).reshape(bottom - top, right - left, 2)
+    grid = torch.from_numpy(grid).to(device=source.device, dtype=source.dtype)[None]
+    source_rgb = source[:, :, :, :3].movedim(-1, 1)
+    warped = F.grid_sample(source_rgb, grid, mode="bilinear", padding_mode="zeros", align_corners=False)[0].movedim(0, -1)
+
+    source_mask_np = _polygon_mask(source_height, source_width, _face_oval(source_face, connection_sets))
+    source_mask = torch.from_numpy(source_mask_np).to(device=source.device, dtype=source.dtype)[None, None]
+    warped_source_mask = F.grid_sample(source_mask, grid, mode="bilinear", padding_mode="zeros", align_corners=False)[0, 0]
+    target_mask_np = _polygon_mask(bottom - top, right - left, _face_oval(target_face, connection_sets), left, top)
+    target_mask = torch.from_numpy(target_mask_np).to(device=source.device, dtype=source.dtype)
+    hard_mask = torch.minimum(warped_source_mask, target_mask).clamp(0.0, 1.0)
+    mask = torch.minimum(_blur_mask(hard_mask, feather), hard_mask)
+
+    target_crop = target[0, top:bottom, left:right, :3].to(device=source.device, dtype=source.dtype)
+    warped = _harmonize_face(warped, target_crop, mask)
+    composited = target_crop * (1.0 - mask[..., None]) + warped * mask[..., None]
+
+    output = target.clone()
+    output[0, top:bottom, left:right, :3] = composited.to(device=target.device, dtype=target.dtype)
+    return output
+
+
 class LoadMediaPipeFaceLandmarker(io.ComfyNode):
     """Load MediaPipe Face Landmarker v2 weights. Contains both detector variants
     (short / full), shared mesh, blendshapes, and canonical geometry."""
@@ -309,6 +494,55 @@ class MediaPipeFaceLandmarker(io.ComfyNode):
             bboxes.append(per_bb)
         return io.NodeOutput({"frames": frames, "image_size": (H, W),
                               "connection_sets": face_detection_model.connection_sets}, bboxes)
+
+
+class MediaPipeFaceTransfer(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MediaPipeFaceTransfer",
+            search_aliases=["face", "facial", "mediapipe", "face transfer", "face swap"],
+            display_name="Transfer Face (MediaPipe)",
+            category="image/transform",
+            description="Transfers the largest source face into the largest target face using MediaPipe landmarks.",
+            inputs=[
+                FaceDetectionType.Input("face_detection_model"),
+                io.Image.Input("source_image"),
+                io.Image.Input("target_image"),
+            ],
+            outputs=[io.Image.Output()],
+        )
+
+    @classmethod
+    def execute(cls, face_detection_model, source_image, target_image) -> io.NodeOutput:
+        source_batch = source_image.shape[0]
+        target_batch = target_image.shape[0]
+        if source_batch not in (1, target_batch):
+            raise ValueError("Face transfer requires one source image or one source image per target image.")
+
+        source_faces = _detect_largest_faces(face_detection_model, source_image)
+        target_faces = _detect_largest_faces(face_detection_model, target_image)
+        for i, face in enumerate(source_faces):
+            if face is None:
+                raise ValueError(f"Face transfer could not detect a source face in image {i}.")
+        for i, face in enumerate(target_faces):
+            if face is None:
+                raise ValueError(f"Face transfer could not detect a target face in image {i}.")
+
+        connection_sets = face_detection_model.connection_sets
+        canonical = face_detection_model.canonical_data["canonical_vertices"]
+        output = []
+        for i in range(target_batch):
+            source_index = 0 if source_batch == 1 else i
+            output.append(_transfer_face(
+                source_image[source_index:source_index + 1],
+                target_image[i:i + 1],
+                source_faces[source_index],
+                target_faces[i],
+                connection_sets,
+                canonical,
+            ))
+        return io.NodeOutput(torch.cat(output, dim=0))
 
 
 # Topology keys unioned by the 'all' connections preset (contour parts + irises + nose).
@@ -501,7 +735,7 @@ class MediaPipeFaceMask(io.ComfyNode):
 class MediaPipeFaceExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [LoadMediaPipeFaceLandmarker, MediaPipeFaceLandmarker, MediaPipeFaceMeshVisualize, MediaPipeFaceMask]
+        return [LoadMediaPipeFaceLandmarker, MediaPipeFaceLandmarker, MediaPipeFaceTransfer, MediaPipeFaceMeshVisualize, MediaPipeFaceMask]
 
 
 async def comfy_entrypoint() -> MediaPipeFaceExtension:
