@@ -26,11 +26,12 @@ import folder_paths
 from comfy_api.latest import ComfyExtension, io
 
 from comfy_extras.mediapipe.face_landmarker import FaceLandmarker
-from comfy_extras.mediapipe.face_geometry import transformation_matrix_from_detection
+from comfy_extras.mediapipe import face_geometry
 
 
 FaceDetectionType = io.Custom("FACE_DETECTION_MODEL")
 FaceLandmarksType = io.Custom("FACE_LANDMARKS")
+FaceTransferOptionsType = io.Custom("MEDIAPIPE_FACE_TRANSFER_OPTIONS")
 
 _CANONICAL_KEYS = ("canonical_vertices", "procrustes_indices", "procrustes_weights")
 _CONTOUR_PARTS = ("face_oval", "left_eye", "right_eye", "left_eyebrow", "right_eyebrow", "lips")
@@ -236,6 +237,120 @@ def _mesh_triangles(edges: frozenset[tuple[int, int]]) -> np.ndarray:
     if not triangles:
         raise ValueError("Face transfer requires the MediaPipe face tessellation topology.")
     return np.asarray(sorted(triangles), dtype=np.int32)
+
+
+def _transform_landmarks(landmarks: np.ndarray, matrix: np.ndarray) -> np.ndarray:
+    return landmarks @ matrix[:3, :3].T + matrix[:3, 3]
+
+
+def _landmark_adjacency(edges: frozenset[tuple[int, int]], count: int) -> list[set[int]]:
+    adjacency = [set() for _ in range(count)]
+    for a, b in edges:
+        if a < count and b < count:
+            adjacency[a].add(b)
+            adjacency[b].add(a)
+    return adjacency
+
+
+def _smooth_landmark_delta(delta: np.ndarray, adjacency: list[set[int]], iterations: int = 2) -> np.ndarray:
+    smoothed = delta.copy()
+    for _ in range(iterations):
+        previous = smoothed
+        smoothed = previous.copy()
+        for vertex, neighbors in enumerate(adjacency):
+            if neighbors:
+                smoothed[vertex] = 0.5 * previous[vertex] + 0.5 * previous[list(neighbors)].mean(axis=0)
+    return smoothed
+
+
+def _identity_vertex_weights(connection_sets: dict[str, frozenset], adjacency: list[set[int]], count: int) -> np.ndarray:
+    protected = set()
+    for name in ("left_eye", "right_eye", "left_eyebrow", "right_eyebrow", "lips"):
+        protected.update(_edge_vertices(connection_sets[name]))
+    weights = np.ones(count, dtype=np.float64)
+    weights[list(protected)] = 0.0
+    seen = set(protected)
+    frontier = set(protected)
+    for ring_weight in (0.25, 0.75):
+        frontier = {neighbor for vertex in frontier for neighbor in adjacency[vertex]} - seen
+        if not frontier:
+            break
+        weights[list(frontier)] = np.minimum(weights[list(frontier)], ring_weight)
+        seen.update(frontier)
+    return weights
+
+
+def _rotation_from_transform(matrix: np.ndarray) -> np.ndarray:
+    left, _, right = np.linalg.svd(matrix[:3, :3])
+    rotation = left @ right
+    if np.linalg.det(rotation) < 0.0:
+        left[:, -1] *= -1.0
+        rotation = left @ right
+    return rotation
+
+
+def _smoothstep(value: float) -> float:
+    value = float(np.clip(value, 0.0, 1.0))
+    return value * value * (3.0 - 2.0 * value)
+
+
+def _automatic_identity_strength(source_matrix: np.ndarray, target_matrix: np.ndarray,
+                                 source_landmarks: np.ndarray, target_landmarks: np.ndarray,
+                                 triangles: np.ndarray) -> float:
+    source_forward = _rotation_from_transform(source_matrix)[:, 2]
+    target_forward = _rotation_from_transform(target_matrix)[:, 2]
+    pose_angle = np.degrees(np.arccos(np.clip(source_forward @ target_forward, -1.0, 1.0)))
+    pose_weight = 1.0 - _smoothstep((pose_angle - 10.0) / 35.0)
+
+    source_triangle = source_landmarks[triangles]
+    target_triangle = target_landmarks[triangles]
+    source_area = ((source_triangle[:, 1, 0] - source_triangle[:, 0, 0]) * (source_triangle[:, 2, 1] - source_triangle[:, 0, 1])
+                   - (source_triangle[:, 1, 1] - source_triangle[:, 0, 1]) * (source_triangle[:, 2, 0] - source_triangle[:, 0, 0]))
+    target_area = ((target_triangle[:, 1, 0] - target_triangle[:, 0, 0]) * (target_triangle[:, 2, 1] - target_triangle[:, 0, 1])
+                   - (target_triangle[:, 1, 1] - target_triangle[:, 0, 1]) * (target_triangle[:, 2, 0] - target_triangle[:, 0, 0]))
+    area = np.abs(target_area)
+    total_area = float(area.sum())
+    coverage = float(area[(source_area * target_area > 0.0) & (np.abs(source_area) > 1e-6)].sum() / total_area) if total_area > 1e-6 else 0.0
+    coverage_weight = _smoothstep((coverage - 0.70) / 0.25)
+    return pose_weight * coverage_weight
+
+
+def _hybrid_target_geometry(source_face: dict, target_face: dict, source_width: int, source_height: int,
+                            target_width: int, target_height: int, canonical_data: dict,
+                            connection_sets: dict[str, frozenset], triangles: np.ndarray,
+                            identity_mode: str, identity_shape: float) -> tuple[np.ndarray, np.ndarray]:
+    source_matrix, source_metric = face_geometry.facial_geometry_from_detection(
+        source_face, source_width, source_height, canonical_data,
+    )
+    target_matrix, target_metric = face_geometry.facial_geometry_from_detection(
+        target_face, target_width, target_height, canonical_data,
+    )
+    source_canonical = _transform_landmarks(source_metric, np.linalg.inv(source_matrix))
+    target_canonical = _transform_landmarks(target_metric, np.linalg.inv(target_matrix))
+    alignment = face_geometry.solve_landmark_alignment(
+        source_canonical, target_canonical,
+        canonical_data["procrustes_indices"], canonical_data["procrustes_weights"],
+    )
+    source_canonical = _transform_landmarks(source_canonical, alignment)
+
+    adjacency = _landmark_adjacency(connection_sets["tesselation"], source_canonical.shape[0])
+    delta = _smooth_landmark_delta(source_canonical - target_canonical, adjacency)
+    nose = _edge_vertices(connection_sets["nose"])
+    nose_offset = delta[nose].mean(axis=0)
+    delta[nose] -= nose_offset
+    nose_ring = {neighbor for vertex in nose for neighbor in adjacency[vertex]} - set(nose)
+    if nose_ring:
+        delta[list(nose_ring)] -= nose_offset * 0.5
+
+    if identity_mode == "automatic":
+        identity_shape = _automatic_identity_strength(
+            source_matrix, target_matrix, source_face["landmarks_xy"], target_face["landmarks_xy"], triangles,
+        )
+    vertex_weights = _identity_vertex_weights(connection_sets, adjacency, source_canonical.shape[0])
+    hybrid_canonical = target_canonical + delta * (vertex_weights * identity_shape)[:, None]
+    hybrid_metric = _transform_landmarks(hybrid_canonical, target_matrix)
+    hybrid_landmarks = face_geometry.project_metric_landmarks(hybrid_metric, target_width, target_height)
+    return hybrid_landmarks, -hybrid_metric[:, 2]
 
 
 def _mesh_warp_points(source_landmarks: np.ndarray, target_landmarks: np.ndarray, triangles: np.ndarray,
@@ -491,14 +606,27 @@ def _detect_largest_faces(face_detection_model, images: torch.Tensor) -> list[di
 
 
 def _transfer_face(source: torch.Tensor, target: torch.Tensor, source_face: dict, target_face: dict,
-                   connection_sets: dict[str, frozenset], triangles: np.ndarray, source_scale_factor: float = 1.08,
+                   connection_sets: dict[str, frozenset], canonical_data: dict, triangles: np.ndarray,
+                   source_scale_factor: float = 1.08,
                    edge_feather: float = 8.0, forehead_coverage: float = 0.5,
-                   color_match: float = 0.5, lighting_match: float = 0.5) -> torch.Tensor:
+                   color_match: float = 0.5, lighting_match: float = 0.5,
+                   identity_mode: str = "automatic", identity_shape: float = 0.5) -> torch.Tensor:
     source_center, source_scale = _face_scale(source_face)
-    target_center, target_scale = _face_scale(target_face)
-    target_anchors = (_face_transfer_anchors(target_face, connection_sets) - target_center) / target_scale
+    source_height, source_width = source.shape[1:3]
+    target_height, target_width = target.shape[1:3]
+    hybrid_landmarks, target_depth = _hybrid_target_geometry(
+        source_face, target_face, source_width, source_height, target_width, target_height,
+        canonical_data, connection_sets, triangles, identity_mode, identity_shape,
+    )
+    hybrid_face = target_face.copy()
+    hybrid_face["landmarks_xy"] = hybrid_landmarks
+    minimum = hybrid_landmarks.min(axis=0)
+    maximum = hybrid_landmarks.max(axis=0)
+    hybrid_face["bbox_xyxy"] = np.array([minimum[0], minimum[1], maximum[0], maximum[1]], dtype=np.float32)
+    target_center, target_scale = _face_scale(hybrid_face)
+    target_anchors = (_face_transfer_anchors(hybrid_face, connection_sets) - target_center) / target_scale
 
-    x1, y1, x2, y2 = (float(v) for v in target_face["bbox_xyxy"])
+    x1, y1, x2, y2 = (float(v) for v in hybrid_face["bbox_xyxy"])
     padding = max(2, round(target_scale * 0.04))
     left = max(0, int(np.floor(x1)) - padding)
     top = max(0, int(np.floor(y1)) - padding)
@@ -509,11 +637,8 @@ def _transfer_face(source: torch.Tensor, target: torch.Tensor, source_face: dict
 
     yy, xx = np.mgrid[top:bottom, left:right]
     target_points = np.column_stack([xx.reshape(-1), yy.reshape(-1)]).astype(np.float64)
-    target_depth = target_face.get("landmarks_3d")
-    if target_depth is not None:
-        target_depth = target_depth[:, 2]
     source_points, mesh_coverage = _mesh_warp_points(
-        source_face["landmarks_xy"], target_face["landmarks_xy"], triangles,
+        source_face["landmarks_xy"], hybrid_landmarks, triangles,
         left, top, right, bottom, target_depth,
     )
     source_points = source_points.reshape(-1, 2)
@@ -525,9 +650,7 @@ def _transfer_face(source: torch.Tensor, target: torch.Tensor, source_face: dict
     source_normalized *= (1.0 - (1.0 - 1.0 / source_scale_factor) * overscale_weight)[:, None]
     source_points = source_normalized * source_scale + source_center
 
-    source_height, source_width = source.shape[1:3]
     source_grid = _sampling_grid(source_points, source_height, source_width).reshape(bottom - top, right - left, 2)
-    target_height, target_width = target.shape[1:3]
     source_grid = torch.from_numpy(source_grid).to(device=source.device, dtype=source.dtype)[None]
 
     source_rgb = source[:, :, :, :3].movedim(-1, 1)
@@ -542,7 +665,7 @@ def _transfer_face(source: torch.Tensor, target: torch.Tensor, source_face: dict
     warped_source_mask = F.grid_sample(source_mask, source_mask_grid, mode="bilinear", padding_mode="zeros", align_corners=False)[0, 0]
 
     target_mask_np, target_mask_left, target_mask_top = _face_transfer_mask(
-        target_height, target_width, target_face, connection_sets, edge_feather, forehead_coverage, target,
+        target_height, target_width, hybrid_face, connection_sets, edge_feather, forehead_coverage, target,
     )
     target_mask = torch.from_numpy(target_mask_np).to(device=source.device, dtype=source.dtype)[None, None]
     target_mask_grid = _sampling_grid(target_points, target_mask_np.shape[0], target_mask_np.shape[1], target_mask_left, target_mask_top)
@@ -671,12 +794,52 @@ class MediaPipeFaceLandmarker(io.ComfyNode):
         for per_frame in frames:
             per_bb = []
             for f in per_frame:
-                f["transformation_matrix"] = transformation_matrix_from_detection(f, W, H, canonical)
+                f["transformation_matrix"] = face_geometry.transformation_matrix_from_detection(f, W, H, canonical)
                 x1, y1, x2, y2 = (float(v) for v in f["bbox_xyxy"])
                 per_bb.append({"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1, "label": "face", "score": float(f["score"])})
             bboxes.append(per_bb)
         return io.NodeOutput({"frames": frames, "image_size": (H, W),
                               "connection_sets": face_detection_model.connection_sets}, bboxes)
+
+
+class MediaPipeFaceTransferOptions(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MediaPipeFaceTransferOptions",
+            display_name="Face Transfer Options (MediaPipe)",
+            category="image/transform",
+            inputs=[
+                io.Float.Input("source_scale", default=1.1, min=0.8, max=1.5, step=0.01,
+                               tooltip="Scales the source face coverage while keeping feature centers aligned."),
+                io.Float.Input("edge_feather", default=9.0, min=1.0, max=25.0, step=0.5,
+                               tooltip="Width of the source-to-target transition as a percentage of face size."),
+                io.Float.Input("forehead_coverage", default=0.25, min=0.0, max=1.0, step=0.02,
+                               tooltip="Extends valid forehead coverage toward the face oval while excluding strong edges."),
+                io.Float.Input("color_match", default=0.75, min=0.0, max=1.0, step=0.05,
+                               tooltip="Matches target color in large similar-color face regions."),
+                io.Float.Input("lighting_match", default=0.25, min=0.0, max=1.0, step=0.05,
+                               tooltip="Matches target lighting in large similar-color face regions."),
+                io.Combo.Input("identity_mode", options=["automatic", "manual"], default="automatic",
+                               tooltip="Automatic reduces source shape when pose compatibility or visible coverage decreases."),
+                io.Float.Input("identity_shape", default=0.5, min=0.0, max=1.0, step=0.05,
+                               tooltip="Source identity geometry strength when identity mode is manual."),
+            ],
+            outputs=[FaceTransferOptionsType.Output("options")],
+        )
+
+    @classmethod
+    def execute(cls, source_scale, edge_feather, forehead_coverage, color_match, lighting_match,
+                identity_mode, identity_shape) -> io.NodeOutput:
+        return io.NodeOutput({
+            "source_scale": source_scale,
+            "edge_feather": edge_feather,
+            "forehead_coverage": forehead_coverage,
+            "color_match": color_match,
+            "lighting_match": lighting_match,
+            "identity_mode": identity_mode,
+            "identity_shape": identity_shape,
+        })
 
 
 class MediaPipeFaceTransfer(io.ComfyNode):
@@ -692,27 +855,31 @@ class MediaPipeFaceTransfer(io.ComfyNode):
                 FaceDetectionType.Input("face_detection_model"),
                 io.Image.Input("source_image"),
                 io.Image.Input("target_image"),
-                io.Float.Input("source_scale", default=1.1, min=0.8, max=1.5, step=0.01, advanced=True,
-                               tooltip="Scales the source face coverage while keeping feature centers aligned."),
-                io.Float.Input("edge_feather", default=9.0, min=1.0, max=25.0, step=0.5, advanced=True,
-                               tooltip="Width of the source-to-target transition as a percentage of face size."),
-                io.Float.Input("forehead_coverage", default=0.25, min=0.0, max=1.0, step=0.02, advanced=True,
-                               tooltip="Extends valid forehead coverage from the eyes toward the face oval. Strong color edges such as bangs remain excluded."),
-                io.Float.Input("color_match", default=0.75, min=0.0, max=1.0, step=0.05, advanced=True,
-                               tooltip="Matches target color in large similar-color face regions."),
-                io.Float.Input("lighting_match", default=0.25, min=0.0, max=1.0, step=0.05, advanced=True,
-                               tooltip="Matches target lighting in large similar-color face regions."),
+                FaceTransferOptionsType.Input("options", optional=True,
+                                              tooltip="Optional advanced configuration from Face Transfer Options (MediaPipe)."),
             ],
             outputs=[io.Image.Output()],
         )
 
     @classmethod
-    def execute(cls, face_detection_model, source_image, target_image, source_scale=1.1,
-                edge_feather=9.0, forehead_coverage=0.25, color_match=0.75, lighting_match=0.25) -> io.NodeOutput:
+    def execute(cls, face_detection_model, source_image, target_image, options=None) -> io.NodeOutput:
         source_batch = source_image.shape[0]
         target_batch = target_image.shape[0]
         if source_batch not in (1, target_batch):
             raise ValueError("Face transfer requires one source image or one source image per target image.")
+
+        if options is None:
+            source_scale, edge_feather, forehead_coverage = 1.1, 9.0, 0.25
+            color_match, lighting_match = 0.75, 0.25
+            identity_mode, identity_shape = "automatic", 0.5
+        else:
+            source_scale = options["source_scale"]
+            edge_feather = options["edge_feather"]
+            forehead_coverage = options["forehead_coverage"]
+            color_match = options["color_match"]
+            lighting_match = options["lighting_match"]
+            identity_mode = options["identity_mode"]
+            identity_shape = options["identity_shape"]
 
         source_faces = _detect_largest_faces(face_detection_model, source_image)
         target_faces = _detect_largest_faces(face_detection_model, target_image)
@@ -734,12 +901,15 @@ class MediaPipeFaceTransfer(io.ComfyNode):
                 source_faces[source_index],
                 target_faces[i],
                 connection_sets,
+                face_detection_model.canonical_data,
                 triangles,
                 source_scale,
                 edge_feather,
                 forehead_coverage,
                 color_match,
                 lighting_match,
+                identity_mode,
+                identity_shape,
             ))
         return io.NodeOutput(torch.cat(output, dim=0))
 
@@ -934,7 +1104,7 @@ class MediaPipeFaceMask(io.ComfyNode):
 class MediaPipeFaceExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [LoadMediaPipeFaceLandmarker, MediaPipeFaceLandmarker, MediaPipeFaceTransfer, MediaPipeFaceMeshVisualize, MediaPipeFaceMask]
+        return [LoadMediaPipeFaceLandmarker, MediaPipeFaceLandmarker, MediaPipeFaceTransferOptions, MediaPipeFaceTransfer, MediaPipeFaceMeshVisualize, MediaPipeFaceMask]
 
 
 async def comfy_entrypoint() -> MediaPipeFaceExtension:

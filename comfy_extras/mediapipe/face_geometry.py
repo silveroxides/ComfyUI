@@ -42,7 +42,13 @@ def _estimate_scale(canonical: np.ndarray, runtime: np.ndarray, weights: np.ndar
     return float(np.linalg.norm(_solve_weighted_orthogonal_problem(canonical, runtime, weights)[:3, 0]))
 
 
-def solve_facial_transformation_matrix(
+def solve_landmark_alignment(source: np.ndarray, target: np.ndarray,
+                             indices: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    sub = indices.astype(np.int64)
+    return _solve_weighted_orthogonal_problem(source[sub].T, target[sub].T, weights).astype(np.float32)
+
+
+def _solve_facial_geometry(
     landmarks_normalized: np.ndarray,
     canonical_vertices: np.ndarray,
     procrustes_indices: np.ndarray,
@@ -52,8 +58,8 @@ def solve_facial_transformation_matrix(
     # face_geometry_calculator_options.pbtxt defaults
     vertical_fov_degrees: float = 63.0,
     near: float = 1.0,
-) -> np.ndarray:
-    """4x4 facial transformation matrix via two-pass scale recovery
+) -> tuple[np.ndarray, np.ndarray]:
+    """4x4 facial transformation matrix and metric landmarks via two-pass scale recovery.
     `landmarks_normalized` is (N, 3) in MediaPipe normalized convention: x, y
     in [0,1] with TOP-LEFT origin, z in width-scaled units.
     """
@@ -62,7 +68,7 @@ def solve_facial_transformation_matrix(
     w_near = image_width * h_near / image_height
 
     sub = procrustes_indices.astype(np.int64)
-    screen = landmarks_normalized[sub].T.astype(np.float64).copy()
+    screen = landmarks_normalized.T.astype(np.float64).copy()
     canon = canonical_vertices[sub].T.astype(np.float64).copy()
     weights = procrustes_weights.astype(np.float64)
 
@@ -71,7 +77,7 @@ def solve_facial_transformation_matrix(
     screen[0] = screen[0] * w_near - 0.5 * w_near
     screen[1] = screen[1] * h_near - 0.5 * h_near
     screen[2] = screen[2] * w_near
-    depth_offset = float(screen[2].mean())
+    depth_offset = float(screen[2, sub].mean())
 
     def _unproject(s: np.ndarray, scale: float) -> np.ndarray:
         s = s.copy()
@@ -81,11 +87,68 @@ def solve_facial_transformation_matrix(
         s[2] *= -1.0
         return s
 
-    first = screen.copy()
+    first = screen[:, sub].copy()
     first[2] *= -1.0
     s1 = _estimate_scale(canon, first, weights) # 1st pass: Procrustes on projected XY
-    s2 = _estimate_scale(canon, _unproject(screen, s1), weights) # 2nd pass: rescale z by s1, un-project XY
-    return _solve_weighted_orthogonal_problem(canon, _unproject(screen, s1 * s2), weights).astype(np.float32)
+    s2 = _estimate_scale(canon, _unproject(screen[:, sub], s1), weights) # 2nd pass: rescale z by s1, un-project XY
+    metric_landmarks = _unproject(screen, s1 * s2)
+    matrix = _solve_weighted_orthogonal_problem(canon, metric_landmarks[:, sub], weights)
+    return matrix.astype(np.float32), metric_landmarks.T.astype(np.float32)
+
+
+def solve_facial_transformation_matrix(
+    landmarks_normalized: np.ndarray,
+    canonical_vertices: np.ndarray,
+    procrustes_indices: np.ndarray,
+    procrustes_weights: np.ndarray,
+    image_width: int,
+    image_height: int,
+    vertical_fov_degrees: float = 63.0,
+    near: float = 1.0,
+) -> np.ndarray:
+    return _solve_facial_geometry(
+        landmarks_normalized, canonical_vertices, procrustes_indices, procrustes_weights,
+        image_width, image_height, vertical_fov_degrees, near,
+    )[0]
+
+
+def _normalized_landmarks_from_detection(face_dict: dict, image_width: int, image_height: int) -> np.ndarray:
+    lmks_xy, lmks_3d = face_dict["landmarks_xy"], face_dict["landmarks_3d"]
+    aug = np.concatenate([lmks_3d[:, :2].astype(np.float64), np.ones((lmks_xy.shape[0], 1))], axis=1)
+    matrix, *_ = np.linalg.lstsq(aug, lmks_xy.astype(np.float64), rcond=None)
+    scale_x = float(np.linalg.norm(matrix[0]))
+    z_scale = scale_x / image_width if scale_x > 1e-6 else 1.0 / image_width
+
+    normalized = np.empty((lmks_xy.shape[0], 3), dtype=np.float32)
+    normalized[:, 0] = lmks_xy[:, 0] / image_width
+    normalized[:, 1] = lmks_xy[:, 1] / image_height
+    normalized[:, 2] = lmks_3d[:, 2] * z_scale
+    return normalized
+
+
+def facial_geometry_from_detection(face_dict: dict, image_width: int, image_height: int,
+                                   canonical_data: dict) -> tuple[np.ndarray, np.ndarray]:
+    normalized = _normalized_landmarks_from_detection(face_dict, image_width, image_height)
+    return _solve_facial_geometry(
+        normalized, canonical_data["canonical_vertices"],
+        canonical_data["procrustes_indices"], canonical_data["procrustes_weights"],
+        image_width=image_width, image_height=image_height,
+    )
+
+
+def project_metric_landmarks(landmarks: np.ndarray, image_width: int, image_height: int,
+                             vertical_fov_degrees: float = 63.0, near: float = 1.0) -> np.ndarray:
+    h_near = 2.0 * near * math.tan(0.5 * math.radians(vertical_fov_degrees))
+    w_near = image_width * h_near / image_height
+    depth = -landmarks[:, 2]
+    if np.any(depth <= 1e-6):
+        raise ValueError("Face geometry projected behind the camera.")
+    screen_x = landmarks[:, 0] * near / depth
+    screen_y = landmarks[:, 1] * near / depth
+    return np.column_stack([
+        (screen_x / w_near + 0.5) * image_width,
+        (0.5 - screen_y / h_near) * image_height,
+    ]).astype(np.float32)
 
 
 def transformation_matrix_from_detection(face_dict: dict, image_width: int, image_height: int, canonical_data: dict) -> np.ndarray:
@@ -93,18 +156,4 @@ def transformation_matrix_from_detection(face_dict: dict, image_width: int, imag
     FaceMesh emits (x, y, z) in 192-canonical units; MP's geometry expects
     z_norm = z_canonical * scale_x / image_width"""
 
-    lmks_xy, lmks_3d = face_dict["landmarks_xy"], face_dict["landmarks_3d"]
-    aug = np.concatenate([lmks_3d[:, :2].astype(np.float64), np.ones((lmks_xy.shape[0], 1))], axis=1)
-    M, *_ = np.linalg.lstsq(aug, lmks_xy.astype(np.float64), rcond=None)
-    scale_x = float(np.linalg.norm(M[0]))
-    z_scale = scale_x / image_width if scale_x > 1e-6 else 1.0 / image_width
-
-    normalized = np.empty((lmks_xy.shape[0], 3), dtype=np.float32)
-    normalized[:, 0] = lmks_xy[:, 0] / image_width
-    normalized[:, 1] = lmks_xy[:, 1] / image_height
-    normalized[:, 2] = lmks_3d[:, 2] * z_scale
-    return solve_facial_transformation_matrix(
-        normalized, canonical_data["canonical_vertices"],
-        canonical_data["procrustes_indices"], canonical_data["procrustes_weights"],
-        image_width=image_width, image_height=image_height,
-    )
+    return facial_geometry_from_detection(face_dict, image_width, image_height, canonical_data)[0]

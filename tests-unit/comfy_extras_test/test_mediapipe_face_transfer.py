@@ -41,6 +41,15 @@ def _face(canonical, center, scale):
     return {
         "bbox_xyxy": np.array([minimum[0], minimum[1], maximum[0], maximum[1]], dtype=np.float32),
         "landmarks_xy": landmarks,
+        "landmarks_3d": canonical.copy(),
+    }
+
+
+def _canonical_data(canonical):
+    return {
+        "canonical_vertices": canonical,
+        "procrustes_indices": np.arange(canonical.shape[0], dtype=np.int32),
+        "procrustes_weights": np.ones(canonical.shape[0], dtype=np.float32),
     }
 
 
@@ -70,6 +79,58 @@ def test_mesh_warp_rejects_flipped_triangle():
     _, coverage = mediapipe_nodes._mesh_warp_points(source, target, np.array([[0, 1, 2]]), 0, 0, 4, 4)
 
     assert not coverage.any()
+
+
+def test_metric_geometry_projects_back_to_landmarks():
+    canonical, _ = _face_data()
+    face = _face(canonical, (24, 20), 12)
+
+    _, metric = mediapipe_nodes.face_geometry.facial_geometry_from_detection(
+        face, 48, 48, _canonical_data(canonical),
+    )
+    projected = mediapipe_nodes.face_geometry.project_metric_landmarks(metric, 48, 48)
+
+    np.testing.assert_allclose(projected, face["landmarks_xy"], atol=1e-4)
+
+
+def test_automatic_identity_strength_uses_pose_not_roll():
+    landmarks = np.array([[0.0, 0.0], [3.0, 0.0], [0.0, 3.0]])
+    triangles = np.array([[0, 1, 2]])
+    source = np.eye(4)
+    roll = np.eye(4)
+    angle = np.radians(30.0)
+    roll[:3, :3] = np.array([[np.cos(angle), -np.sin(angle), 0.0], [np.sin(angle), np.cos(angle), 0.0], [0.0, 0.0, 1.0]])
+    yaw = np.eye(4)
+    angle = np.radians(45.0)
+    yaw[:3, :3] = np.array([[np.cos(angle), 0.0, np.sin(angle)], [0.0, 1.0, 0.0], [-np.sin(angle), 0.0, np.cos(angle)]])
+
+    roll_strength = mediapipe_nodes._automatic_identity_strength(source, roll, landmarks, landmarks, triangles)
+    yaw_strength = mediapipe_nodes._automatic_identity_strength(source, yaw, landmarks, landmarks, triangles)
+
+    assert roll_strength == pytest.approx(1.0)
+    assert yaw_strength == pytest.approx(0.0, abs=1e-6)
+
+
+def test_hybrid_geometry_transfers_outline_and_preserves_expression_features():
+    canonical, connection_sets = _face_data()
+    source = _face(canonical, (20, 20), 12)
+    target = _face(canonical, (20, 20), 12)
+    oval = mediapipe_nodes._edge_vertices(connection_sets["face_oval"])
+    source["landmarks_xy"][oval, 0] = 20.0 + (source["landmarks_xy"][oval, 0] - 20.0) * 1.3
+    minimum = source["landmarks_xy"].min(axis=0)
+    maximum = source["landmarks_xy"].max(axis=0)
+    source["bbox_xyxy"] = np.array([minimum[0], minimum[1], maximum[0], maximum[1]], dtype=np.float32)
+    triangles = mediapipe_nodes._mesh_triangles(connection_sets["tesselation"])
+
+    hybrid, _ = mediapipe_nodes._hybrid_target_geometry(
+        source, target, 48, 48, 48, 48, _canonical_data(canonical), connection_sets, triangles, "manual", 1.0,
+    )
+    expression = set()
+    for name in ("left_eye", "right_eye", "left_eyebrow", "right_eyebrow", "lips"):
+        expression.update(mediapipe_nodes._edge_vertices(connection_sets[name]))
+
+    assert np.max(np.abs(hybrid[oval, 0] - target["landmarks_xy"][oval, 0])) > 0.1
+    np.testing.assert_allclose(hybrid[list(expression)], target["landmarks_xy"][list(expression)], atol=1e-4)
 
 
 def test_transfer_anchors_use_feature_centers_only():
@@ -234,7 +295,9 @@ def test_transfer_preserves_target_outside_face_region():
     target = torch.full((1, 64, 64, 3), 0.2)
 
     triangles = mediapipe_nodes._mesh_triangles(connection_sets["tesselation"])
-    output = mediapipe_nodes._transfer_face(source, target, source_face, target_face, connection_sets, triangles)
+    output = mediapipe_nodes._transfer_face(
+        source, target, source_face, target_face, connection_sets, _canonical_data(canonical), triangles,
+    )
 
     assert output.shape == target.shape
     assert output.dtype == target.dtype
@@ -246,12 +309,14 @@ def test_transfer_preserves_target_outside_face_region():
 
 def test_node_broadcasts_single_source(monkeypatch):
     face = {"bbox_xyxy": np.array([0, 0, 10, 10])}
+    calls = []
     monkeypatch.setattr(mediapipe_nodes, "_detect_largest_faces", lambda _model, images: [face] * images.shape[0])
-    monkeypatch.setattr(
-        mediapipe_nodes,
-        "_transfer_face",
-        lambda source, target, *_args: target + source.mean(),
-    )
+
+    def transfer(source, target, *_args):
+        calls.append(_args[-7:])
+        return target + source.mean()
+
+    monkeypatch.setattr(mediapipe_nodes, "_transfer_face", transfer)
     model = type("Model", (), {
         "connection_sets": {"tesselation": frozenset({(0, 1), (1, 2), (0, 2)})},
         "canonical_data": {"canonical_vertices": np.empty((0, 3))},
@@ -262,6 +327,48 @@ def test_node_broadcasts_single_source(monkeypatch):
     output = mediapipe_nodes.MediaPipeFaceTransfer.execute(model, source, target)[0]
 
     torch.testing.assert_close(output, torch.ones_like(target))
+    assert calls == [(1.1, 9.0, 0.25, 0.75, 0.25, "automatic", 0.5)] * 3
+
+
+def test_node_uses_face_transfer_options(monkeypatch):
+    face = {"bbox_xyxy": np.array([0, 0, 10, 10])}
+    calls = []
+    monkeypatch.setattr(mediapipe_nodes, "_detect_largest_faces", lambda _model, images: [face] * images.shape[0])
+
+    def transfer(_source, target, *_args):
+        calls.append(_args[-7:])
+        return target
+
+    monkeypatch.setattr(mediapipe_nodes, "_transfer_face", transfer)
+    model = type("Model", (), {
+        "connection_sets": {"tesselation": frozenset({(0, 1), (1, 2), (0, 2)})},
+        "canonical_data": {"canonical_vertices": np.empty((0, 3))},
+    })()
+    options = mediapipe_nodes.MediaPipeFaceTransferOptions.execute(
+        1.2, 7.0, 0.4, 0.6, 0.3, "manual", 0.8,
+    )[0]
+
+    mediapipe_nodes.MediaPipeFaceTransfer.execute(
+        model, torch.ones((1, 8, 8, 3)), torch.zeros((1, 8, 8, 3)), options,
+    )
+
+    assert calls == [(1.2, 7.0, 0.4, 0.6, 0.3, "manual", 0.8)]
+
+
+def test_face_transfer_options_return_configuration():
+    options = mediapipe_nodes.MediaPipeFaceTransferOptions.execute(
+        1.2, 7.0, 0.4, 0.6, 0.3, "manual", 0.8,
+    )[0]
+
+    assert options == {
+        "source_scale": 1.2,
+        "edge_feather": 7.0,
+        "forehead_coverage": 0.4,
+        "color_match": 0.6,
+        "lighting_match": 0.3,
+        "identity_mode": "manual",
+        "identity_shape": 0.8,
+    }
 
 
 def test_node_rejects_incompatible_batches():
