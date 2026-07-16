@@ -282,6 +282,10 @@ def _face_transfer_mask(height: int, width: int, face: dict, connection_sets: di
         landmarks[_edge_vertices(connection_sets["left_eye"])],
         landmarks[_edge_vertices(connection_sets["right_eye"])],
     ])
+    eyebrows = np.concatenate([
+        landmarks[_edge_vertices(connection_sets["left_eyebrow"])],
+        landmarks[_edge_vertices(connection_sets["right_eyebrow"])],
+    ])
     eye_center = eyes.mean(axis=0)
     mouth_center = landmarks[_edge_vertices(connection_sets["lips"])].mean(axis=0)
     vertical = mouth_center - eye_center
@@ -317,9 +321,34 @@ def _face_transfer_mask(height: int, width: int, face: dict, connection_sets: di
             high = max(low + 0.08, 0.22)
             color_edge = np.clip((color_distance - low) / (high - low), 0.0, 1.0)
             color_edge = color_edge * color_edge * (3.0 - 2.0 * color_edge)
-            forehead = np.clip(1.0 - (relative_y - eye_top) / max(vertical_length * 0.25, 1.0), 0.0, 1.0)
+            eyebrow_top = float(np.min((eyebrows - eye_center) @ vertical))
+            forehead = np.clip(1.0 - (relative_y - eyebrow_top) / max(vertical_length * 0.10, 1.0), 0.0, 1.0)
             forehead = forehead * forehead * (3.0 - 2.0 * forehead)
-            mask *= 1.0 - forehead * color_edge
+            oval_distance = scipy.ndimage.distance_transform_edt(oval)
+            outer = np.clip(1.0 - oval_distance / max(scale * 0.12, 1.0), 0.0, 1.0)
+            occlusion_zone = np.maximum(forehead, outer)
+            horizontal = np.array([vertical[1], -vertical[0]])
+            relative_x = (xx - eye_center[0]) * horizontal[0] + (yy - eye_center[1]) * horizontal[1]
+            protected = np.zeros_like(oval)
+            for eye_name, eyebrow_name in (("left_eye", "left_eyebrow"), ("right_eye", "right_eyebrow")):
+                feature = landmarks[_edge_vertices(connection_sets[eye_name] | connection_sets[eyebrow_name])]
+                feature_x = (feature - eye_center) @ horizontal
+                feature_y = (feature - eye_center) @ vertical
+                protected |= (
+                    (relative_x >= feature_x.min() - scale * 0.08)
+                    & (relative_x <= feature_x.max() + scale * 0.08)
+                    & (relative_y >= feature_y.min() - scale * 0.04)
+                    & (relative_y <= feature_y.max() + scale * 0.04)
+                )
+            candidates = oval & ~protected & (color_edge > 0.25) & (occlusion_zone > 0.05)
+            labels, count = scipy.ndimage.label(candidates, structure=np.ones((3, 3), dtype=np.uint8))
+            if count > 0:
+                boundary = oval & (oval_distance <= max(2.0, blend_width * 1.5))
+                sizes = np.bincount(labels.ravel())
+                touches_boundary = np.bincount(labels.ravel(), weights=boundary.ravel(), minlength=sizes.shape[0]) > 0
+                keep = (sizes >= max(16, round(int(oval.sum()) * 0.005))) & touches_boundary
+                keep[0] = False
+                mask *= 1.0 - color_edge * occlusion_zone * keep[labels]
 
     return mask.astype(np.float32), left, top_offset
 

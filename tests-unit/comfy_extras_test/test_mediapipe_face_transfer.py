@@ -91,6 +91,22 @@ def test_transfer_mask_excludes_forehead_color_edges():
     assert edge_aware.sum() < geometric.sum()
 
 
+def test_transfer_mask_preserves_isolated_makeup():
+    canonical, connection_sets = _face_data()
+    face = _face(canonical, (20, 20), 12)
+    image = torch.full((1, 48, 48, 3), 0.6)
+    image[:, 12:20, 10:19] = 0.0
+
+    geometric, _, _ = mediapipe_nodes._face_transfer_mask(
+        48, 48, face, connection_sets, forehead_coverage=1.0,
+    )
+    edge_aware, _, _ = mediapipe_nodes._face_transfer_mask(
+        48, 48, face, connection_sets, forehead_coverage=1.0, image=image,
+    )
+
+    np.testing.assert_allclose(edge_aware, geometric)
+
+
 def test_property_match_targets_large_similar_color_regions():
     source = torch.empty((32, 32, 3))
     source[:] = torch.tensor([0.70, 0.45, 0.40])
