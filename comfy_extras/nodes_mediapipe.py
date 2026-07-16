@@ -645,23 +645,23 @@ class MediaPipeFaceTransfer(io.ComfyNode):
                 FaceDetectionType.Input("face_detection_model"),
                 io.Image.Input("source_image"),
                 io.Image.Input("target_image"),
-                io.Float.Input("source_scale", default=1.08, min=0.9, max=1.3, step=0.01, advanced=True,
+                io.Float.Input("source_scale", default=1.1, min=0.8, max=1.5, step=0.01, advanced=True,
                                tooltip="Scales the source face coverage while keeping feature centers aligned."),
-                io.Float.Input("edge_feather", default=8.0, min=1.0, max=25.0, step=0.5, advanced=True,
+                io.Float.Input("edge_feather", default=9.0, min=1.0, max=25.0, step=0.5, advanced=True,
                                tooltip="Width of the source-to-target transition as a percentage of face size."),
-                io.Float.Input("forehead_coverage", default=0.5, min=0.0, max=1.0, step=0.05, advanced=True,
+                io.Float.Input("forehead_coverage", default=0.25, min=0.0, max=1.0, step=0.02, advanced=True,
                                tooltip="Extends valid forehead coverage from the eyes toward the face oval. Strong color edges such as bangs remain excluded."),
-                io.Float.Input("color_match", default=0.5, min=0.0, max=1.0, step=0.05, advanced=True,
+                io.Float.Input("color_match", default=0.75, min=0.0, max=1.0, step=0.05, advanced=True,
                                tooltip="Matches target color in large similar-color face regions."),
-                io.Float.Input("lighting_match", default=0.5, min=0.0, max=1.0, step=0.05, advanced=True,
+                io.Float.Input("lighting_match", default=0.25, min=0.0, max=1.0, step=0.05, advanced=True,
                                tooltip="Matches target lighting in large similar-color face regions."),
             ],
             outputs=[io.Image.Output()],
         )
 
     @classmethod
-    def execute(cls, face_detection_model, source_image, target_image, source_scale=1.08,
-                edge_feather=8.0, forehead_coverage=0.5, color_match=0.5, lighting_match=0.5) -> io.NodeOutput:
+    def execute(cls, face_detection_model, source_image, target_image, source_scale=1.1,
+                edge_feather=9.0, forehead_coverage=0.25, color_match=0.75, lighting_match=0.25) -> io.NodeOutput:
         source_batch = source_image.shape[0]
         target_batch = target_image.shape[0]
         if source_batch not in (1, target_batch):
