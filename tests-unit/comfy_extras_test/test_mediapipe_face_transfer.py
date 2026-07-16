@@ -54,6 +54,28 @@ def test_thin_plate_spline_reproduces_affine_mapping():
     np.testing.assert_allclose(actual, expected, atol=1e-6)
 
 
+def test_transfer_anchors_use_feature_centers_only():
+    canonical, connection_sets = _face_data()
+    face = _face(canonical, (20, 20), 12)
+
+    anchors = mediapipe_nodes._face_transfer_anchors(face, connection_sets)
+    lip_vertices = mediapipe_nodes._edge_vertices(connection_sets["lips"])
+
+    assert anchors.shape == (7, 2)
+    np.testing.assert_allclose(anchors[4], face["landmarks_xy"][lip_vertices].mean(axis=0))
+
+
+def test_target_warp_weight_decays_outside_face_edge():
+    mask = np.zeros((11, 11), dtype=np.float32)
+    mask[4:7, 4:7] = 1.0
+
+    weight = mediapipe_nodes._edge_warp_weight(mask, radius=3)
+
+    assert weight[5, 5] == 1.0
+    assert 0.0 < weight[5, 2] < weight[5, 3] < weight[5, 4]
+    assert weight[5, 1] == 0.0
+
+
 def test_largest_face_uses_landmark_area():
     faces = [
         {"bbox_xyxy": np.array([0, 0, 10, 20])},
@@ -98,7 +120,7 @@ def test_transfer_preserves_target_outside_face_region():
     ], dim=-1)[None]
     target = torch.full((1, 64, 64, 3), 0.2)
 
-    output = mediapipe_nodes._transfer_face(source, target, source_face, target_face, connection_sets, canonical)
+    output = mediapipe_nodes._transfer_face(source, target, source_face, target_face, connection_sets)
 
     assert output.shape == target.shape
     assert output.dtype == target.dtype
