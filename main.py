@@ -131,6 +131,10 @@ def apply_custom_paths():
     if args.base_directory:
         logging.info(f"Setting base directory to: {folder_paths.base_path}")
 
+    # --models-directory
+    if args.models_directory:
+        logging.info(f"Setting models directory to: {folder_paths.models_dir}")
+
     # --output-directory, --input-directory, --user-directory
     if args.output_directory:
         output_dir = os.path.abspath(args.output_directory)
@@ -403,7 +407,7 @@ def prompt_worker(q, server_instance):
                 hook_breaker_ac10a0.restore_functions()
 
                 if not asset_seeder.is_disabled():
-                    asset_seeder.enqueue_enrich(roots=("output",), compute_hashes=True)
+                    asset_seeder.enqueue_enrich(roots=("output",), compute_hashes=args.enable_asset_hashing)
                 asset_seeder.resume()
 
 
@@ -458,7 +462,7 @@ def setup_database():
         if dependencies_available():
             init_db()
             if args.enable_assets:
-                if asset_seeder.start(roots=("models", "input", "output"), prune_first=True, compute_hashes=True):
+                if asset_seeder.start(roots=("models", "input", "output"), prune_first=True, compute_hashes=args.enable_asset_hashing):
                     logging.info("Background asset scan initiated for models, input, output")
     except Exception as e:
         if "database is locked" in str(e):
@@ -557,8 +561,13 @@ if __name__ == "__main__":
         logging.warning("WARNING: You are using a python version older than 3.10, please upgrade to a newer one. 3.12 and above is recommended.")
 
     if args.disable_dynamic_vram:
-        logging.warning("Dynamic vram disabled with argument. If you have any issues with dynamic vram enabled please give us a detailed reports as this argument will be removed soon.")
-
+        logging.warning(
+            "Dynamic vram disabled with argument. If you have any issues with "
+            "dynamic vram enabled please give us a detailed reports as this "
+            "argument will be removed soon. If you use gguf we recommend keeping "
+            "dynamic vram enabled and using native ComfyUI model formats instead. "
+            "ComfyUI native formats like fp8 will be faster even if they are larger than your memory."
+        )
     event_loop, _, start_all_func = start_comfyui()
     try:
         x = start_all_func()

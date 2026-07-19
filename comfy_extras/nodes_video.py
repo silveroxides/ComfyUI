@@ -27,6 +27,7 @@ class SaveWEBM(io.ComfyNode):
             ],
             hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
             is_output_node=True,
+            outputs=[io.Image.Output(display_name="images")]
         )
 
     @classmethod
@@ -69,7 +70,7 @@ class SaveWEBM(io.ComfyNode):
         container.mux(stream.encode())
         container.close()
 
-        return io.NodeOutput(ui=ui.PreviewVideo([ui.SavedResult(file, subfolder, io.FolderType.output)]))
+        return io.NodeOutput(images, ui=ui.PreviewVideo([ui.SavedResult(file, subfolder, io.FolderType.output)]))
 
 class SaveVideo(io.ComfyNode):
     @classmethod
@@ -80,7 +81,7 @@ class SaveVideo(io.ComfyNode):
             display_name="Save Video",
             category="video",
             essentials_category="Basics",
-            description="Saves the input images to your ComfyUI output directory.",
+            description="Saves the input videos to your ComfyUI output directory.",
             inputs=[
                 io.Video.Input("video", tooltip="The video to save."),
                 io.String.Input("filename_prefix", default="video/ComfyUI", tooltip="The prefix for the file to save. This may include formatting information such as %date:yyyy-MM-dd% or %Empty Latent Image.width% to include values from nodes."),
@@ -89,6 +90,7 @@ class SaveVideo(io.ComfyNode):
             ],
             hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
             is_output_node=True,
+            outputs=[io.Video.Output("video")],
         )
 
     @classmethod
@@ -117,7 +119,7 @@ class SaveVideo(io.ComfyNode):
             metadata=saved_metadata
         )
 
-        return io.NodeOutput(ui=ui.PreviewVideo([ui.SavedResult(file, subfolder, io.FolderType.output)]))
+        return io.NodeOutput(video, ui=ui.PreviewVideo([ui.SavedResult(file, subfolder, io.FolderType.output)]))
 
 
 class CreateVideo(io.ComfyNode):
