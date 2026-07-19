@@ -8,7 +8,7 @@ if not torch.cuda.is_available():
     cli_args.cpu = True
 
 try:
-    from comfy.text_encoders.krea2 import KREA2_TEMPLATE, Krea2Tokenizer, _krea2_template_end
+    from comfy.text_encoders.krea2 import KREA2_TEMPLATE, Krea2Tokenizer
     from comfy_extras.nodes_cond import CLIPTextEncodeImageFusion, _flatten_images, _fuse_conditionings, _resize_visual_tokens, _spatial_fusion_mask, _visual_grid, _visual_token_span
 finally:
     cli_args.cpu = prior_cpu
@@ -63,20 +63,66 @@ def test_visual_span_accounts_for_stripped_prefix():
     assert _visual_token_span(tokens, cond_length=9, visual_tokens=4) == (1, 5)
 
 
-def test_krea_template_stripping_preserves_visual_tokens():
+def test_krea_conditioning_template_preserves_visual_tokens():
+    tokenizer = Krea2Tokenizer()
+    image = torch.zeros(1, 64, 64, 3)
+
+    for image_count in (1, 2, 3):
+        tokens = tokenizer.tokenize_with_weights("test prompt", images=[image] * image_count)
+        token_pairs = tokens["qwen3vl_4b"][0]
+        image_positions = [i for i, pair in enumerate(token_pairs) if isinstance(pair[0], dict)]
+        im_start_positions = [i for i, pair in enumerate(token_pairs) if pair[0] == 151644]
+        template_end = im_start_positions[1] + 3
+
+        assert len(image_positions) == image_count
+        assert token_pairs[im_start_positions[1] + 1][0] == 872
+        assert token_pairs[im_start_positions[1] + 2][0] == 198
+        assert template_end <= image_positions[0]
+
+        if image_count == 1:
+            cond_length = len(token_pairs) - 1 + 4 - template_end
+            assert _visual_token_span(tokens, cond_length, 4) == (image_positions[0] - template_end, image_positions[0] - template_end + 4)
+
+
+def test_krea_preformatted_and_text_generation_templates_are_unchanged():
     tokenizer = Krea2Tokenizer()
     image = torch.zeros(1, 64, 64, 3)
     image_prompt = "<|vision_start|><|image_pad|><|vision_end|>test prompt"
 
-    for text in ("test prompt", KREA2_TEMPLATE.format(image_prompt)):
-        tokens = tokenizer.tokenize_with_weights(text, images=[image])
-        token_pairs = tokens["qwen3vl_4b"][0]
-        image_position = next(i for i, pair in enumerate(token_pairs) if isinstance(pair[0], dict))
-        template_end = _krea2_template_end(token_pairs)
-        cond_length = len(token_pairs) - 1 + 4 - template_end
+    preformatted = tokenizer.tokenize_with_weights(KREA2_TEMPLATE.format(image_prompt), images=[image])["qwen3vl_4b"][0]
+    generated = tokenizer.tokenize_with_weights("test prompt", image=image, thinking=False)["qwen3vl_4b"][0]
 
-        assert template_end <= image_position
-        assert _visual_token_span(tokens, cond_length, 4) == (image_position - template_end, image_position - template_end + 4)
+    assert [pair[0] for pair in preformatted[:3]] == [151644, 8948, 198]
+    assert [pair[0] for pair in generated[:3]] == [151644, 872, 198]
+
+
+def test_krea_tokenization_runs_through_image_fusion_node():
+    class FakeKreaClip:
+        def __init__(self):
+            self.tokenizer = Krea2Tokenizer()
+
+        def tokenize(self, text, images):
+            return self.tokenizer.tokenize_with_weights(text, images=images)
+
+        def encode_from_tokens_scheduled(self, tokens):
+            token_pairs = tokens["qwen3vl_4b"][0]
+            im_start_positions = [i for i, pair in enumerate(token_pairs) if pair[0] == 151644]
+            values = []
+            for pair in token_pairs[im_start_positions[1] + 3:]:
+                if isinstance(pair[0], dict):
+                    values.extend([pair[0]["data"].mean()] * 4)
+                else:
+                    values.append(torch.tensor(0.0))
+            return [[torch.stack(values).reshape(1, -1, 1), {}]]
+
+    images = {
+        "image_1": torch.zeros(1, 64, 64, 3),
+        "image_2": torch.ones(1, 64, 64, 3),
+    }
+
+    conditioning = CLIPTextEncodeImageFusion.execute(FakeKreaClip(), "test prompt", images, "spatial-checkerboard").args[0]
+
+    assert set(conditioning[0][0][:, 1:5].flatten().tolist()) == {0.0, 1.0}
 
 
 def test_fusion_replaces_only_visual_tokens_and_preserves_dtype_and_metadata():
