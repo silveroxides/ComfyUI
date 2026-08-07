@@ -966,6 +966,7 @@ class MiniMaxH3(supported_models_base.BASE):
 
     sampling_settings = {
         "shift": 12.0,
+        "audio_shift": 3.0,
     }
 
     unet_extra_config = {}
@@ -1450,6 +1451,20 @@ class WAN22_Animate(WAN21_T2V):
 
     def get_model(self, state_dict, prefix="", device=None):
         out = model_base.WAN22_Animate(self, device=device)
+        return out
+
+class WAN_Animate2(WAN21_T2V):
+    unet_config = {
+        "image_model": "wan2.1",
+        "model_type": "animate2",
+    }
+
+    sampling_settings = {
+        "shift": 5.0,
+    }
+
+    def get_model(self, state_dict, prefix="", device=None):
+        out = model_base.WAN_Animate2(self, device=device)
         return out
 
 class WAN22_T2V(WAN21_T2V):
@@ -2469,6 +2484,7 @@ models = [
     WAN22_S2V,
     WAN21_HuMo,
     WAN22_Animate,
+    WAN_Animate2,
     WAN21_FlowRVS,
     WAN21_SCAIL,
     WAN21_SCAIL2,
