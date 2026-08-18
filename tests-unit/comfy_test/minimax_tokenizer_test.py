@@ -10,10 +10,10 @@ from comfy.text_encoders.minimax import MiniMaxH3Tokenizer, VISION_END, VISION_S
 
 def test_h3_prompt_embedding_uses_core_token_parser(tmp_path):
     embedding = torch.arange(2 * 5120, dtype=torch.float32).reshape(2, 5120)
-    save_file({"qwen3vl_32b": embedding}, tmp_path / "h3_visual.safetensors")
+    save_file({"qwen3vl_32b": embedding}, tmp_path / "h3_embedding.safetensors")
     tokenizer = MiniMaxH3Tokenizer(embedding_directory=str(tmp_path))
 
-    entries = tokenizer.tokenize_with_weights("subject embedding:h3_visual")["qwen3vl_32b"][0]
+    entries = tokenizer.tokenize_with_weights("subject embedding:h3_embedding")["qwen3vl_32b"][0]
     tensors = [entry[0] for entry in entries if torch.is_tensor(entry[0])]
 
     assert len(tensors) == 2
@@ -89,9 +89,9 @@ def test_h3_embedding_rows_reach_process_tokens_without_image(tmp_path):
             return InputEmbeddings()
 
     embedding = torch.arange(2 * 5120, dtype=torch.float32).reshape(2, 5120)
-    save_file({"qwen3vl_32b": embedding}, tmp_path / "h3_visual.safetensors")
+    save_file({"qwen3vl_32b": embedding}, tmp_path / "h3_embedding.safetensors")
     tokenizer = MiniMaxH3Tokenizer(embedding_directory=str(tmp_path))
-    entries = tokenizer.tokenize_with_weights("embedding:h3_visual")["qwen3vl_32b"][0]
+    entries = tokenizer.tokenize_with_weights("embedding:h3_embedding")["qwen3vl_32b"][0]
 
     clip_model = object.__new__(sd1_clip.SDClipModel)
     clip_model.special_tokens = {"pad": 151643}
