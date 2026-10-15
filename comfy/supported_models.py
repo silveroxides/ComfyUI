@@ -815,10 +815,7 @@ class Flux2(Flux):
 
     def __init__(self, unet_config):
         super().__init__(unet_config)
-        hidden_size = unet_config['hidden_size']
-        context_in_dim = unet_config['context_in_dim']
-        modifier_factor = ((hidden_size / context_in_dim) * 1.9)
-        self.memory_usage_factor = self.memory_usage_factor * (2.0 * 2.0) * ((hidden_size * modifier_factor) / 2604)
+        self.memory_usage_factor = self.memory_usage_factor * (2.0 * 2.0) * (unet_config['hidden_size'] / 2604)
 
     def get_model(self, state_dict, prefix="", device=None):
         out = model_base.Flux2(self, device=device)
