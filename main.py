@@ -18,7 +18,7 @@ import folder_paths
 import time
 from comfy.cli_args import enables_dynamic_vram
 from app import governance
-from app.logger import setup_logger, log_startup_warning
+from app.logger import setup_logger
 console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
@@ -46,41 +46,14 @@ if __name__ == "__main__":
 
     import cuda_malloc
 
-    if os.name == "nt":
-        cuda_visibility = os.environ.get("CUDA_VISIBLE_DEVICES")
-        device_selection = args.cuda_device
-
-        try:
-            gpu_count = sum("NVIDIA" in name.upper() for name in cuda_malloc.get_gpu_names())
-        except OSError:
-            gpu_count = 0
-
-        if gpu_count > 1:
-            warning = None
-            multiple_visible = False
-            if device_selection is None and args.default_device is None and cuda_visibility is None:
-                os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-                warning = "Multiple NVIDIA GPUs detected. ComfyUI will use GPU 0 only on Windows by default. To restore all GPUs, pass --cuda-device all --disable-pinned-memory."
-            elif device_selection == "all":
-                multiple_visible = cuda_visibility is None or "," in cuda_visibility
-            elif device_selection is not None:
-                multiple_visible = "," in device_selection
-            elif args.default_device is not None:
-                multiple_visible = True
-            else:
-                multiple_visible = "," in cuda_visibility
-
-            if multiple_visible and not args.disable_pinned_memory:
-                warning = "Multiple NVIDIA GPUs are visible on Windows with pinned memory enabled. Restart with --disable-pinned-memory to avoid CUDA host-transfer failures."
-
-            if warning:
-                log_startup_warning(f"""
-________________________________________________________________________
-WARNING WARNING WARNING WARNING WARNING
-
-{warning}
-________________________________________________________________________
-""".strip())
+    if (
+        os.name == "nt"
+        and args.cuda_device is None
+        and args.default_device is None
+        and os.environ.get("CUDA_VISIBLE_DEVICES") is None
+    ):
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+        logging.warning("On windows we are currently forcing single GPU mode in ComfyUI due to a Nvidia related issue, if you want to disable this use: --cuda-device all")
 
     if args.disable_api_nodes:
         logging.warning("--disable-api-nodes is deprecated and will be removed in a future version. It currently behaves like --offline. Use --offline to keep the frontend offline, or --disable-partner-nodes to only disable partner nodes.")
@@ -121,7 +94,7 @@ if os.name == "nt":
 
 if __name__ == "__main__":
     os.environ['TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL'] = '1'
-    if args.default_device is not None:
+    if args.default_device is not None and args.cuda_device != "all":
         default_dev = args.default_device
         devices = list(range(32))
         devices.remove(default_dev)
@@ -130,7 +103,9 @@ if __name__ == "__main__":
         os.environ['CUDA_VISIBLE_DEVICES'] = str(devices)
         os.environ['HIP_VISIBLE_DEVICES'] = str(devices)
 
-    if args.cuda_device is not None:
+    if args.cuda_device == "all":
+        logging.info("Set cuda devices to all")
+    elif args.cuda_device is not None:
         os.environ['CUDA_VISIBLE_DEVICES'] = str(args.cuda_device)
         os.environ['HIP_VISIBLE_DEVICES'] = str(args.cuda_device)
         os.environ["ASCEND_RT_VISIBLE_DEVICES"] = str(args.cuda_device)
@@ -144,7 +119,6 @@ if __name__ == "__main__":
         if 'CUBLAS_WORKSPACE_CONFIG' not in os.environ:
             os.environ['CUBLAS_WORKSPACE_CONFIG'] = ":4096:8"
 
-    import cuda_malloc
     if "rocm" in cuda_malloc.get_torch_version_noimport():
         os.environ['OCL_SET_SVM_SIZE'] = '4194304'  # 4TB. Much larger than the ROCM 64GB/256GB defaults for Aimdos liberal VA use
 
@@ -315,10 +289,10 @@ if args.enable_dynamic_vram or (enables_dynamic_vram() and dynamic_vram_supporte
         logging.warning("Unsupported Pytorch detected. DynamicVRAM support requires Pytorch version 2.8 or later (2.12+ is recommended). Falling back to legacy ModelPatcher. VRAM estimates may be unreliable especially on Windows")
     else:
         try:
-            aimdo_initialized = comfy_aimdo.control.init_devices((d.index, int(args.vram_headroom * 1024 ** 3)) for d in comfy.model_management.get_core_torch_devices())
+            aimdo_initialized = comfy_aimdo.control.init_devices((d.index, int(args.vram_headroom * 1024 ** 3)) for d in comfy.model_management.get_all_torch_devices())
         except TypeError:
             # comfy-aimdo 0.4.9 protocol.
-            aimdo_initialized = comfy_aimdo.control.init_devices(d.index for d in comfy.model_management.get_core_torch_devices())
+            aimdo_initialized = comfy_aimdo.control.init_devices(d.index for d in comfy.model_management.get_all_torch_devices())
 
         if aimdo_initialized:
             if console_log_level == 'DEBUG':

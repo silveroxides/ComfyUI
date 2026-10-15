@@ -244,23 +244,6 @@ def get_all_torch_devices(exclude_current=False):
             devices.remove(current)
     return devices
 
-def get_core_torch_devices(exclude_current=False):
-    """Return devices ComfyUI core is allowed to manage.
-
-    Other visible devices remain available to custom nodes. Core multi-GPU
-    management is enabled only by explicitly passing multiple devices through
-    --cuda-device.
-    """
-    if args.cuda_device is not None and "," in args.cuda_device:
-        devices = get_all_torch_devices()
-    else:
-        devices = [get_torch_device()]
-    if exclude_current:
-        current = get_torch_device()
-        if current in devices:
-            devices.remove(current)
-    return devices
-
 def get_gpu_device_options():
     """Return list of device option strings for node widgets.
 
@@ -268,7 +251,7 @@ def get_gpu_device_options():
     adds "gpu:0", "gpu:1", etc. (vendor-agnostic labels).
     """
     options = ["default", "cpu"]
-    devices = get_core_torch_devices()
+    devices = get_all_torch_devices()
     if len(devices) > 1:
         for i in range(len(devices)):
             options.append(f"gpu:{i}")
@@ -301,7 +284,7 @@ def resolve_gpu_device_option(option: str):
             idx = int(option[4:])
         except ValueError:
             return None
-        devices = get_core_torch_devices()
+        devices = get_all_torch_devices()
         if 0 <= idx < len(devices):
             return devices[idx]
     return None
@@ -644,7 +627,7 @@ try:
 except:
     logging.warning("Could not pick default device.")
 try:
-    for device in get_core_torch_devices(exclude_current=True):
+    for device in get_all_torch_devices(exclude_current=True):
         logging.info("Device: {}".format(get_torch_device_name(device)))
 except:
     pass
@@ -2164,7 +2147,7 @@ def soft_empty_cache(force=False):
         torch.cuda.ipc_collect()
 
 def unload_all_models():
-    for device in get_core_torch_devices():
+    for device in get_all_torch_devices():
         free_memory(1e30, device)
 
 def unload_model_and_clones(model: ModelPatcher, unload_additional_models=True, all_devices=False):
@@ -2190,7 +2173,7 @@ def unload_model_and_clones(model: ModelPatcher, unload_additional_models=True, 
     if not all_devices:
         free_memory(1e30, get_torch_device(), keep_loaded)
     else:
-        for device in get_core_torch_devices():
+        for device in get_all_torch_devices():
             free_memory(1e30, device, keep_loaded)
 
 def debug_memory_summary():
