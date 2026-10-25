@@ -1777,7 +1777,9 @@ def pytorch_attention_enabled():
 
 def pytorch_attention_enabled_vae():
     if is_amd():
-        return False  # enabling pytorch attention on AMD currently causes crash when doing high res
+        arch = torch.cuda.get_device_properties(get_torch_device()).gcnArchName
+        if arch.startswith("gfx11"):  # aotriton ships no head dim > 256 kernels for gfx11 (ROCm/aotriton#168), the VAE's single head needs 384 or 512
+            return False
     return pytorch_attention_enabled()
 
 def pytorch_attention_flash_attention():
